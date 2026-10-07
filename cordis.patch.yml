@@ -1,0 +1,21 @@
+# Install this package as a self-contained selectable web_search replacement.
+# The official tool remains available for web_fetch only; this row owns the
+# stable model-facing web_search name.
+- id: tool-web
+  config:
+    fetch: true
+    search: false
+    searchTimeoutMs: 60000
+
+- insert:
+    - id: dsh-web-search
+      name: dsh-web-search
+      config:
+        defaultProvider: deepseek-official
+        enabledProviders:
+          - deepseek-official
+          - openai-codex
+          - zai
+          - google-zread
+        maxResults: 8
+        timeoutMs: 60000
