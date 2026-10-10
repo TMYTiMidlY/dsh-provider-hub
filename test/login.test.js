@@ -4,9 +4,9 @@ import { SearchLoginService } from '../lib/index.js'
 import { stringCodec, objectCodec } from '../lib/codecs.js'
 import { zaiSearch } from '../lib/search.js'
 const settled = () => new Promise(resolve => setImmediate(resolve))
-function bridge(authorization) {
+function bridge(authorization, credentials = {}) {
   const service=Object.create(SearchLoginService.prototype)
-  Object.defineProperty(service,'ctx',{value:{authorization}})
+  Object.defineProperty(service,'ctx',{value:{authorization, credentials}})
   service.attempts=new Map()
   return service
 }
@@ -48,6 +48,28 @@ test('select prompt preserves options and validates string answer',async()=>{
   assert.throws(()=>service.answer(a.id,'two'),/selection/)
   service.answer(a.id,'one'); await settled()
   assert.equal(service.status(a.id).status,'authorized')
+})
+
+test('failed OAuth attempt exposes a fixed public error without partial grant tokens or raw cause', async () => {
+  const access = 'SYNTHETIC_ACCESS_SECRET_NEVER_RETURN'
+  const refresh = 'SYNTHETIC_REFRESH_SECRET_NEVER_RETURN'
+  const record = { key: 'test/key', label: 'Synthetic authorization', methods: [{ id: 'oauth', label: 'OAuth' }], inFlight: false }
+  const service = bridge({
+    describe: () => record,
+    list: () => [record],
+    begin: async () => { throw new Error(`Synthetic OAuth partial grant ${JSON.stringify({ access, refresh })}`) },
+  }, { describeRecord: async () => ({ configured: false }) })
+  const attempt = service.start({ key: 'test/key' })
+  await settled()
+  const status = service.status(attempt.id)
+  const list = await service.list()
+  assert.equal(status.status, 'failed')
+  assert.equal(status.error, 'Account authorization failed; retry and check the authorization page or network connection')
+  for (const result of [status, list]) {
+    assert.doesNotMatch(JSON.stringify(result), new RegExp(`${access}|${refresh}|partial grant`, 'u'))
+    assert.equal(Object.hasOwn(result, 'cause'), false)
+    assert.equal(Object.hasOwn(result, 'rawError'), false)
+  }
 })
 
 test('remote argument codecs reject invalid values rather than coercing them',()=>{

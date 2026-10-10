@@ -1,15 +1,14 @@
-# Host-only login bridge. The separate Provider Hub preset owns web_search.
-# Existing presets, tools and sessions keep their original behavior.
+# One global search route. Keep native tool schemas, presets, sessions and web_fetch.
+# Explicit deployment environment/profile overrides remain authoritative.
+- id: web
+  config:
+    searchProvider: !!js process.env.DSH_WEB_SEARCH_PROVIDER ?? 'dsh-provider-hub'
+    fetchProvider: http
+
 - insert:
     - id: dsh-web-search
       name: dsh-web-search
       config:
-        tool: false
-        defaultProvider: deepseek-official
-        enabledProviders:
-          - deepseek-official
-          - openai-codex
-          - zai
-          - google-zread
-        maxResults: 8
+        searchProviders: [openai-codex]
+        enabledProviders: [deepseek-official, openai-codex, zai, google-zread]
         timeoutMs: 60000

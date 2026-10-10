@@ -2,7 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
-import { apply, applySearchTool } from '../lib/index.js'
+import { apply } from '../lib/index.js'
+import { PROVIDERS, ROUTER_PROVIDER_ID } from '../lib/providers.js'
 import { resolveRecordApiKey } from '../lib/search.js'
 
 const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url)))
@@ -19,9 +20,47 @@ test('client is a declared boot-roster plugin, not an early head script', () => 
   assert.equal(typeof registered.factory, 'function')
 })
 
-test('client adds only Codex OAuth UI, leaving ZAI API-key editors native', async () => {
+test('client stages independent OpenAI/ZAI switches and only Codex OAuth without owning the settings scope', async () => {
   let registered
-  let render
+  let loginRender
+  let settingsRender
+  let settingsSeat
+  let saved = 0
+  let savedValue
+  let formDisposed = false
+  let watchDisposed = false
+  const effects = []
+  const state = { writable: true, saving: false, dirty: false, searchProviders: { text: '["openai-codex"]', overridden: false, invalid: false } }
+  const scope = {
+    getSnapshot: () => ({ state: 'served', fields: { searchProviders: { value: ['openai-codex'] } } }),
+    subscribe: () => () => {},
+    mutate: async callback => { saved++; savedValue = callback({ searchProviders: ['openai-codex'] }); return savedValue },
+    dispose: () => { throw new Error('shared configForms scope must not be disposed by client') },
+  }
+  class SettingsFormModel {
+    constructor(received, fields) {
+      assert.equal(received, scope)
+      assert.equal(fields.length, 1)
+      assert.equal(fields[0].field, 'searchProviders')
+      assert.equal(fields[0].format(['openai-codex', 'zai']), '["openai-codex","zai"]')
+      assert.equal(JSON.stringify(fields[0].parse('[]').value), '[]')
+      assert.equal(fields[0].parse('["deepseek-official"]'), undefined)
+      assert.equal(fields[0].parse('["google-zread"]'), undefined)
+      assert.equal(fields[0].parse('"zai"'), undefined)
+      this.fields = fields
+    }
+    bind(project) { return { getSnapshot: project, subscribe: () => () => {} } }
+    shell() { return { writable: state.writable, saving: state.saving, dirty: state.dirty } }
+    field(name) { return state[name] }
+    actions() { return {
+      edit: (name, value) => { state[name] = { ...state[name], text: value }; state.dirty = true },
+      resetField: name => { state[name] = { ...state[name], text: '["openai-codex"]' } },
+      save: () => scope.mutate(value => ({ ...value, searchProviders: this.fields[0].parse(state.searchProviders.text).value })),
+      discard: () => { state.dirty = false },
+    } }
+    dispose() { formDisposed = true }
+  }
+  const SettingsForm = () => null
   const React = {
     createElement: (type, props, ...children) => ({ type, props: { ...props, children } }),
     useState: () => [undefined, () => {}],
@@ -32,12 +71,27 @@ test('client adds only Codex OAuth UI, leaving ZAI API-key editors native', asyn
   vm.runInNewContext(readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8'), {
     window: { __ModuleLoader__: { load: entry => { registered = entry } } },
   })
-  const plugin = registered.factory(id => { assert.equal(id, 'react'); return React })
-  const scoped = { remote: { searchLogin: {} }, slots: {
+  const plugin = registered.factory(id => {
+    if (id === 'react') return React
+    assert.equal(id, '@deepseek-ai/dsh-client-ui-primitives')
+    return { SettingsForm, SettingsFormModel }
+  })
+  const slots = {
     inject: (_name, callback) => callback(),
-    register: (seat, callback) => { assert.equal(seat.key, 'llm-pi-ai'); render = callback },
-  } }
+    register: (seat, callback) => {
+      if (seat.name === 'plugins.item') { settingsSeat = seat; settingsRender = callback }
+      else { assert.equal(seat.key, 'llm-pi-ai'); loginRender = callback }
+      return () => {}
+    },
+  }
+  const scoped = { remote: { searchLogin: {} }, slots }
   const dispose = await plugin.apply({
+    slots,
+    configForms: {
+      get: id => { assert.equal(id, 'dsh-web-search'); return scope },
+      whileServed: (ids, callback) => { assert.equal(ids.join(','), 'dsh-web-search'); const cleanup = callback(); return () => { watchDisposed = true; cleanup() } },
+    },
+    effect: callback => { const cleanup = callback(); effects.push(cleanup); return cleanup },
     remote: { $mount: async () => async () => {} },
     inject: (_dependencies, callback) => {
       callback(scoped)
@@ -45,43 +99,73 @@ test('client adds only Codex OAuth UI, leaving ZAI API-key editors native', asyn
     },
   })
   for (const provider of ['zai', 'zai-coding-cn', 'deepseek']) {
-    const card = render({ provider: { provider } })
+    const card = loginRender({ provider: { provider } })
     assert.equal(card.type(card.props), null)
   }
-  const card = render({ provider: { provider: 'openai-codex' } })
+  const card = loginRender({ provider: { provider: 'openai-codex' } })
   assert.equal(card.type(card.props).props['data-provider-hub-login'], 'openai-codex')
-  await dispose()
-})
-
-test('host bridge can mount without registering a global shadowed search', () => {
-  let plugins = 0
-  apply({ plugin: () => { plugins++ } }, { tool: false })
-  assert.equal(plugins, 1)
-})
-
-test('preset tool has provider schema, validates, dispatches and formats safely', async () => {
-  let definition
-  let request
-  let section
-  const ctx = {
-    tools: { register: value => { definition = value } },
-    systemPrompt: { section: value => { section = value } },
-    web: { search: async (value, signal) => {
-      request = value
-      assert.equal(signal.aborted, false)
-      return { sources: [{ url: 'https://example.com/', title: 'Example' }], content: 'test', truncated: false }
-    } },
+  assert.equal(settingsSeat.id, 'search-provider')
+  const injected = settingsSeat.inject()
+  const props = { ...injected, useSearchProviderCard: selector => selector(injected.hooks.searchProviderCard.getSnapshot()) }
+  assert.match(settingsRender({ ...props, view: 'summary' }), /独立.*组合搜索.*全部关闭/u)
+  const renderForm = () => {
+    const form = settingsRender(props)
+    assert.equal(form.type, SettingsForm)
+    const nodes = []
+    const visit = node => { if (Array.isArray(node)) { node.forEach(visit); return }; if (node && typeof node === 'object') { nodes.push(node); for (const child of node.props?.children ?? []) visit(child) } }
+    visit(form)
+    assert.ok(!nodes.some(node => node.type === 'select'), 'there is no exclusive provider dropdown')
+    const switches = nodes.filter(node => node.type === 'input' && node.props.type === 'checkbox' && node.props.role === 'switch')
+    assert.equal(switches.length, 2)
+    return { form, switches }
   }
-  applySearchTool(ctx, { defaultProvider: 'deepseek-official', enabledProviders: ['deepseek-official'], maxResults: 1 })
-  assert.equal(definition.name, 'web_search')
-  assert.ok(definition.parameters.properties.provider)
-  const result = await definition.execute({ query: ' trial ' }, { signal: new AbortController().signal })
-  assert.deepEqual(request, { query: 'trial', maxResults: 1 })
-  assert.equal(result.provider, 'deepseek-official')
-  assert.equal(result.sources.length, 1)
-  assert.match(definition.output.render({}, result)[0].text, /untrusted data/)
-  assert.match(section.text, /deepseek-official/)
-  await assert.rejects(() => definition.execute({ query: 'trial', provider: 'zai' }, { signal: new AbortController().signal }), /disabled/)
+  let rendered = renderForm()
+  assert.equal(rendered.switches.find(node => node.props['data-search-provider'] === 'openai-codex').props.checked, true)
+  assert.equal(rendered.switches.find(node => node.props['data-search-provider'] === 'zai').props.checked, false)
+  rendered.switches.find(node => node.props['data-search-provider'] === 'zai').props.onChange({ target: { checked: true } })
+  assert.equal(saved, 0, 'changing a toggle stages an edit without mutating global settings')
+  rendered = renderForm()
+  assert.ok(rendered.switches.every(node => node.props.checked))
+  await rendered.form.props.onSave()
+  assert.equal(saved, 1)
+  assert.equal(JSON.stringify(savedValue.searchProviders), '["openai-codex","zai"]')
+  rendered.switches.find(node => node.props['data-search-provider'] === 'openai-codex').props.onChange({ target: { checked: false } })
+  rendered = renderForm()
+  rendered.switches.find(node => node.props['data-search-provider'] === 'zai').props.onChange({ target: { checked: false } })
+  rendered = renderForm()
+  assert.ok(rendered.switches.every(node => !node.props.checked))
+  assert.equal(saved, 1)
+  await rendered.form.props.onSave()
+  assert.equal(saved, 2)
+  assert.equal(JSON.stringify(savedValue.searchProviders), '[]', 'both toggles off saves official fallback')
+  await dispose()
+  for (const cleanup of effects.reverse()) if (typeof cleanup === 'function') cleanup()
+  assert.equal(formDisposed, true)
+  assert.equal(watchDisposed, true)
+})
+
+test('Host mounts native providers without shadowing any preset tool or prompt', () => {
+  let plugins = 0
+  const registered = []
+  apply({
+    plugin: () => { plugins++ },
+    web: { registerSearchProvider: value => { registered.push(value) } },
+    tools: { register: () => { throw new Error('Host must not register tools') } },
+    systemPrompt: { section: () => { throw new Error('Host must not change preset prompts') } },
+  }, { searchProviders: [], enabledProviders: PROVIDERS, timeoutMs: 60000 })
+  assert.equal(plugins, 1)
+  assert.deepEqual(registered.map(provider => provider.id).sort(), [ROUTER_PROVIDER_ID, 'openai-codex', 'zai', 'google-zread'].sort())
+  assert.ok(registered.every(provider => typeof provider.search === 'function' && typeof provider.available === 'function'))
+})
+
+test('published bundle supplies only the Host patch and no extra Agent mode', () => {
+  assert.deepEqual([manifest.dsh.bundle.patch].flat(), ['./cordis.patch.yml'])
+  assert.ok(!manifest.files.includes('preset.patch.yml'))
+  const patch = readFileSync(new URL('../cordis.patch.yml', import.meta.url), 'utf8')
+  assert.doesNotMatch(patch, /dsh-agent-preset|preset-provider-hub|dsh-web-search\/tool/u)
+  assert.match(patch, /searchProvider/u)
+  assert.match(patch, /DSH_WEB_SEARCH_PROVIDER/u)
+  assert.equal(manifest.exports['./tool'], './lib/tool.js', 'compatibility entry remains published')
 })
 
 test('Z.AI managed credential references resolve through DSH rather than only shell env', async () => {
