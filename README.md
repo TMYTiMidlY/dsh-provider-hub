@@ -4,7 +4,7 @@
 
 一个独立的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 插件，为**所有已有 `web_search` 配置 Codex / Z.AI 单路或组合搜索**，并在 Web Models 页面提供 ChatGPT/Codex OAuth 登录入口。
 
-> `0.2.0` 不添加、复制或要求切换「Provider Hub」Agent 模式。保留官方搜索工具、现有 preset 和 `web_fetch`，默认只开启 Codex。Codex 与 Z.AI 是两个独立开关：可以开一个、同时开启，或全部关闭以使用 DSH 官方搜索。只有 ChatGPT/Codex 有 OAuth 登录按钮，Z.AI 使用 DSH 官方 API Key 配置入口。
+> `0.2.1` 不添加、复制或要求切换「Provider Hub」Agent 模式。保留官方搜索工具、现有 preset 和 `web_fetch`，默认只开启 Codex。Codex 与 Z.AI 是两个独立开关：可以开一个、同时开启，或全部关闭以使用 DSH 官方搜索。只有 ChatGPT/Codex 有 OAuth 登录按钮，Z.AI 使用 DSH 官方 API Key 配置入口。
 
 ## 单路、组合与官方搜索
 
@@ -28,16 +28,18 @@
 
 ## 安装
 
-先在独立 `DSH_HOME` 验收，再安装到目标 Web profile。重新打包使用新的目录，不覆盖之前的 `0.2.0` 产物：
+先在独立 `DSH_HOME` 验收，再安装到目标 Web profile。打包 `0.2.1` 使用新的目录，不覆盖之前的产物：
 
 ```sh
 PACK_DIR="$(mktemp -d /tmp/dsh-web-search-pack.XXXXXX)"
 npm pack --pack-destination "${PACK_DIR:?}"
 # 在已安装 dsh 的主机上：
-npm_config_auto_install_peers=false dsh plugin --profile web add "${PACK_DIR:?}/dsh-web-search-0.2.0.tgz"
+npm_config_auto_install_peers=false dsh plugin --profile web add "${PACK_DIR:?}/dsh-web-search-0.2.1.tgz"
 ```
 
 安装命令仅对这一次 `dsh plugin add` 设置 `npm_config_auto_install_peers=false`：DSH peer 包由正在运行的 Host 提供，避免在 profile 中自动安装第二份 DSH 类库而造成跨副本类型身份不一致。不修改全局 npm/pnpm 配置；CI 或独立源码开发中的普通 `npm install` 仍正常安装所需 peers。
+
+插件仅将私有 schema-builder `@deepseek-ai/schemastery@3.18.5-alpha.1` 固定为精确直接依赖，避免旧 profile validator 遮蔽支持 `.volatile()` 的构建器；它不是第二套 DSH runtime。不删除或升级 profile 中供其他插件使用的旧 schema 包，也不升级 Host。
 
 根据插件管理器返回的应用状态处理：已应用的配置可直接验收；需要重启的安装或更新应安排目标 profile 重启，然后完整刷新浏览器加载 client 模块。不要在旧 DSH 进程仍运行时覆盖全局 DSH 安装目录；安装本插件不要求升级 DSH。
 

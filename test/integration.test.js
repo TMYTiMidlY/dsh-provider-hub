@@ -8,6 +8,23 @@ import { resolveRecordApiKey } from '../lib/search.js'
 
 const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url)))
 
+test('package pins a private volatile-capable Schema builder without bundling duplicate Host runtimes', () => {
+  // A peer would resolve to a pre-existing profile-root Schema, which may lack
+  // volatile support. A direct exact dependency gives this plugin its own
+  // builder while runtime services continue to come from the Host.
+  assert.deepEqual(manifest.dependencies, { '@deepseek-ai/schemastery': '3.18.5-alpha.1' })
+  assert.equal(Object.hasOwn(manifest.peerDependencies, '@deepseek-ai/schemastery'), false)
+  assert.deepEqual(manifest.peerDependencies, {
+    '@deepseek-ai/cordis': '>=4.0.5-alpha.1',
+    '@deepseek-ai/dsh-tool-web': '>=0.2.1-alpha.1',
+    '@deepseek-ai/dsh-authorization': '>=0.2.1-alpha.1',
+    '@deepseek-ai/dsh-credentials': '>=0.2.1-alpha.1',
+    '@deepseek-ai/dsh-tools': '>=0.2.1-alpha.1',
+    '@deepseek-ai/dsh-typert-protocol': '>=0.2.1-alpha.1',
+    '@deepseek-ai/dsh-web': '>=0.2.1-alpha.1',
+  })
+})
+
 test('client is a declared boot-roster plugin, not an early head script', () => {
   assert.equal(manifest.exports['./client'], './lib/client.js')
   assert.equal(manifest.dsh.client.platform, 'web')
