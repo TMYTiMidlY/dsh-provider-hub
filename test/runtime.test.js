@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 import { join } from 'node:path'
-import { access } from 'node:fs/promises'
+import { access, readFile } from 'node:fs/promises'
 import { createSearchProvider, PROVIDERS, ROUTER_PROVIDER_ID } from '../lib/providers.js'
 import { SearchError } from '../lib/search.js'
 
@@ -21,6 +21,11 @@ const [cordis, prompt, tools, web, official, scope] = await Promise.all([
   load('cordis'), load('dsh-system-prompt'), load('dsh-tools'), load('dsh-web'), load('dsh-tool-web'), load('dsh-scope'),
 ])
 const runtime = { ...cordis, ...prompt, ...tools, ...web, official, ...scope }
+const nativeToolsPackageUrl = usePeerImports ? import.meta.resolve('@deepseek-ai/dsh-tools/package.json') : pathToFileURL(join(runtimePath, 'dsh-tools/package.json')).href
+const nativeToolsVersion = JSON.parse(await readFile(new URL(nativeToolsPackageUrl), 'utf8')).version
+// alpha.2 deliberately added presentationMeta for nested calls and persisted it
+// on tool/ptc-dispatch. alpha.1 alone has the older root-only metadata contract.
+const retainsNestedMeta = nativeToolsVersion !== '0.2.1-alpha.1'
 const nativeWebModuleUrl = usePeerImports ? import.meta.resolve('@deepseek-ai/dsh-tool-web') : pathToFileURL(join(runtimePath, 'dsh-tool-web/lib/index.js')).href
 const source = (id, title = `Native citation ${id}`) => ({ url: `https://example.invalid/${id}`, title })
 const resultFor = id => ({ content: `RAW_BACKEND_${id}`, sources: [source(id)], truncated: false })
@@ -42,8 +47,8 @@ async function withRuntime(adapters, operation, { maxResults = 3, searchProvider
     await native.ctx.plugin(official, { fetch: false, searchMaxResults: maxResults })
     const minimal = createScope(root, {}); scopes.push(minimal)
     let id = 0
-    const invoke = (args, signal = new AbortController().signal, key = runtime.scopeOf(native.ctx), nested = false) => root.tools.execute({
-      callId: `runtime-test-${++id}`, name: 'web_search', arguments: args, signal, agent: key, ...(nested ? { parent: Symbol('synthetic-parent-execution') } : {}),
+    const invoke = (args, signal = new AbortController().signal, key = runtime.scopeOf(native.ctx)) => root.tools.execute({
+      callId: `runtime-test-${++id}`, name: 'web_search', arguments: args, signal, agent: key,
     })
     return await operation({ root, native, minimal, providerFiber, invoke, switchTo: providers => { current = { ...current, searchProviders: Array.isArray(providers) ? [...providers] : [providers] } } })
   } finally { await Promise.all(scopes.map(item => item.dispose())); await root.fiber.dispose() }
@@ -171,14 +176,56 @@ test('partial failure reaches native meta and render safely, without fake offici
   }, { searchProviders: ['openai-codex', 'zai'], officialSearch: async () => { throw new runtime.WebError(secret, 'WEB_PROVIDER_CREDENTIAL_MISSING') } })
 })
 
-test('nested dispatch retains labeled text and canonical value but no root-only native web metadata', async () => {
-  await withRuntime({ codexSearch: async () => resultFor('nested') }, async ({ invoke }) => {
+test('genuine nested dispatch obeys the installed native metadata contract and retains labeled text', async () => {
+  await withRuntime({ codexSearch: async () => resultFor('nested') }, async ({ root, native }) => {
     const args = { queries: ['nested'] }
-    const nested = await invoke(args, undefined, undefined, true)
-    assert.equal(nested.isError, false); assert.equal(nested.meta, undefined)
+    const key = runtime.scopeOf(native.ctx)
+    const search = root.tools.get('web_search', key)
+    let parentToken
+    let nested
+    let observedChild
+    root.on('tools/result', (exec) => { if (exec.name === 'web_search') observedChild = exec })
+    await native.ctx.plugin(Object.assign(ctx => ctx.tools.register({
+      ...search,
+      name: 'synthetic_nested_search',
+      async execute(acceptedArgs, exec) {
+        assert.equal(exec.parent, undefined)
+        parentToken = exec.token
+        // ToolExecutionInput.parent is public. Use the token actually minted for
+        // this accepted parent call, exactly as the native PTC bridge does.
+        nested = await root.tools.execute({
+          callId: `${exec.callId}:child`, rootCallId: exec.rootCallId,
+          name: 'web_search', arguments: acceptedArgs, signal: exec.signal,
+          agent: exec.agent, parent: exec.token,
+        })
+        assert.equal(nested.isError, false)
+        return nested.value
+      },
+    }), { inject: ['tools'] }))
+    const outer = await root.tools.execute({
+      callId: 'genuine-parent-call', name: 'synthetic_nested_search', arguments: args,
+      signal: new AbortController().signal, agent: key,
+    })
+    assert.equal(outer.isError, false)
+    assert.equal(observedChild.parent, parentToken, 'parent token is retained, not ignored')
+    assert.equal(observedChild.rootCallId, 'genuine-parent-call')
+    assert.deepEqual(Object.keys(nested.value).sort(), ['content', 'sources', 'truncated'])
+    assert.deepEqual(Object.keys(nested.value.sources[0]).sort(), ['title', 'url'])
     assert.equal(nested.value.sources[0].title, '[OpenAI] Native citation nested')
     assert.match(nested.content[0].text, /OpenAI.*Native citation nested/u)
-    assert.equal(runtime.official.presentSearchResult(args, nested), undefined)
+    if (retainsNestedMeta) {
+      assert.deepEqual(Object.keys(nested.meta).sort(), ['answer', 'sources', 'truncated'], nativeToolsVersion)
+      assert.deepEqual(nested.meta.sources, nested.value.sources)
+      assert.equal(nested.meta.answer, nested.value.content)
+      assert.equal(nested.meta.truncated, nested.value.truncated)
+      const view = runtime.official.presentSearchResult(args, nested)
+      assert.equal(view.card, 'web')
+      assert.equal(view.kind, 'search')
+      assert.deepEqual(view.sources, nested.value.sources)
+    } else {
+      assert.equal(nested.meta, undefined, nativeToolsVersion)
+      assert.equal(runtime.official.presentSearchResult(args, nested), undefined)
+    }
     assertNoRaw(nested)
   })
 })

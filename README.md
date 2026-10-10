@@ -35,7 +35,7 @@
 - 所有后端的原始长 `content` / Codex raw output 都不转发。最终 `content` 仅为 router 自己生成的一行提供方结果计数与失败代码；不复制后端原始摘要、wire 数据或错误消息。
 - 来源并集只覆盖**同一条查询**。多条 `queries[]` 由原生工具继续去重，重复 URL 保留原生 first winner；不能宣称穷尽合并了所有跨查询来源。
 - 动态展示沿用原生 preparing/running → 最终 `tool/result`，完成结果自然更新并可展开。DSH `0.2.1-alpha.1` 没有该搜索契约的公开逐来源 stream writer；本版本**不模拟逐条增量来源、不追加假 tool/result、不承诺流式搜索来源**。
-- PTC 的嵌套工具调用不会生成原生根调用 presentation metadata，因此仍使用原生通用文本/value fallback；保留相同短标签与安全内容，不承诺 PTC 子调用拥有根调用同款 WebBlock。
+- 在当前主 Host DSH `0.2.1-alpha.1` 上，PTC 嵌套调用没有根调用同款 presentation metadata，使用原生通用文本/value fallback 并保留短标签与安全内容，不能将此限制泛化到其他 Host。上游 `@deepseek-ai/dsh-tools@0.2.1-alpha.2` 已扩展 nested presentationMeta 并将其保存到 `tool/ptc-dispatch`；本插件遵循宿主原生契约保留合法 metadata，不强行删除，也不承诺所有版本的 PTC 子调用必有根调用同款 WebBlock。
 
 新结果的来源标签随原生 `tool/result.meta.sources` 和模型可见文本持久化，不依赖本插件客户端解释。卸载整个 bundle 后应仍由原生历史组件展示；实际卸载与冷加载需在隔离环境验收后再声明已验证。旧历史若没有来源事实，不追溯猜测标记或改写日志。
 
