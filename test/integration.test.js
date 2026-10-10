@@ -124,7 +124,7 @@ test('client stages independent OpenAI/ZAI switches and only Codex OAuth without
   assert.equal(settingsSeat.id, 'search-provider')
   const injected = settingsSeat.inject()
   const props = { ...injected, useSearchProviderCard: selector => selector(injected.hooks.searchProviderCard.getSnapshot()) }
-  assert.match(settingsRender({ ...props, view: 'summary' }), /独立.*组合搜索.*全部关闭/u)
+  assert.match(settingsRender({ ...props, view: 'summary' }), /官方搜索始终保留.*附加.*Codex.*Z\.AI/u)
   const renderForm = () => {
     const form = settingsRender(props)
     assert.equal(form.type, SettingsForm)
@@ -134,6 +134,11 @@ test('client stages independent OpenAI/ZAI switches and only Codex OAuth without
     assert.ok(!nodes.some(node => node.type === 'select'), 'there is no exclusive provider dropdown')
     const switches = nodes.filter(node => node.type === 'input' && node.props.type === 'checkbox' && node.props.role === 'switch')
     assert.equal(switches.length, 2)
+    const baseline = nodes.find(node => node.props?.['data-search-baseline'] === 'deepseek-official')
+    assert.ok(baseline, 'official baseline is visibly non-interactive, not a third toggle')
+    assert.notEqual(baseline.type, 'input')
+    assert.ok(!switches.some(node => node.props['data-search-provider'] === 'deepseek-official'))
+    assert.ok(nodes.some(node => node.type === 'legend' && node.props.children.includes('附加搜索增强')))
     return { form, switches }
   }
   let rendered = renderForm()
@@ -154,7 +159,7 @@ test('client stages independent OpenAI/ZAI switches and only Codex OAuth without
   assert.equal(saved, 1)
   await rendered.form.props.onSave()
   assert.equal(saved, 2)
-  assert.equal(JSON.stringify(savedValue.searchProviders), '[]', 'both toggles off saves official fallback')
+  assert.equal(JSON.stringify(savedValue.searchProviders), '[]', 'both toggles off removes enhancements but keeps official baseline')
   await dispose()
   for (const cleanup of effects.reverse()) if (typeof cleanup === 'function') cleanup()
   assert.equal(formDisposed, true)

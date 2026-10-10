@@ -2,39 +2,52 @@
 
 [![CI](https://github.com/TMYTiMidlY/dsh-provider-hub/actions/workflows/ci.yml/badge.svg)](https://github.com/TMYTiMidlY/dsh-provider-hub/actions/workflows/ci.yml)
 
-一个独立的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 插件，为**所有已有 `web_search` 配置 Codex / Z.AI 单路或组合搜索**，并在 Web Models 页面提供 ChatGPT/Codex OAuth 登录入口。
+一个独立的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 插件，**始终保留官方搜索，再为所有已有 `web_search` 附加 Codex / Z.AI 搜索增强**，并在 Web Models 页面提供 ChatGPT/Codex OAuth 登录入口。
 
-> `0.2.1` 不添加、复制或要求切换「Provider Hub」Agent 模式。保留官方搜索工具、现有 preset 和 `web_fetch`，默认只开启 Codex。Codex 与 Z.AI 是两个独立开关：可以开一个、同时开启，或全部关闭以使用 DSH 官方搜索。只有 ChatGPT/Codex 有 OAuth 登录按钮，Z.AI 使用 DSH 官方 API Key 配置入口。
+> `0.3.0` 保留官方工具、现有 preset、原生调用栏和 `web_fetch`，不新增 Agent 模式或专属结果渲染器。默认每条查询调用 **官方 + Codex**；Z.AI 可独立附加。两个开关只控制增强，不能关掉官方基线。只有 ChatGPT/Codex 有 OAuth 登录按钮，Z.AI 使用 DSH 官方 API Key 配置入口。
 
-## 单路、组合与官方搜索
+## 官方基线与搜索增强
 
-打开 WebUI **插件 → 搜索提供方**，调整两个开关后点击 **保存**：
+打开 WebUI **插件 → 搜索提供方**。官方基线是非交互提示，不代表凭据已可用；两个增强开关共同暂存，由一次 **保存** 提交：
 
-| Codex | Z.AI | 后续搜索行为 |
+| Codex 增强 | Z.AI 增强 | 后续每条查询的默认调用 |
 |---|---|---|
-| 开 | 关 | 只调用 ChatGPT / Codex（默认） |
-| 关 | 开 | 只调用 Z.AI |
-| 开 | 开 | 两路并行查询，合并结果 |
-| 关 | 关 | 使用 DSH 已注册的官方 DeepSeek 搜索 |
+| 开 | 关 | 官方 + ChatGPT / Codex（默认） |
+| 关 | 开 | 官方 + Z.AI |
+| 开 | 开 | 官方 + ChatGPT / Codex + Z.AI |
+| 关 | 关 | 仅 DSH 官方 DeepSeek 搜索 |
 
+- 官方调用保留原有 endpoint、API Key/账号鉴权与请求记录；不会因开启增强而被替代。仍需可用的 DeepSeek API Key 或账号授权，缺凭据是实际失败，不会伪标成功、创建新 Key 或偷偷开启未选中的增强。
 - Codex 使用 DSH/pi-ai 保存的 ChatGPT OAuth grant；Z.AI 使用 `zai` 或 `zai-coding-cn` API Key，调用 `web_search_prime` MCP。
-- 同时开启时，同一条查询并行调用两路，不以先完成的后端独占结果。按 Codex、Z.AI 的顺序轮流取一个尚未出现的 URL，去重后再轮到下一路，最终只保留工具请求的**总体结果上限**，不是每路各占一份上限。
-- 去重键忽略 URL fragment 与非根路径末尾斜杠；返回的引用保留提供方原始 URL。默认工具上限为 8，显式请求的 `maxResults` 仍由原生工具/搜索服务约束。
-- 一路发生普通错误时，保留另一路成功结果，并在结果 `content` 中明确提示失败后端及错误代码；提示不复制可能含敏感信息的原始错误消息。
-- 所有已开启后端都失败时，整个请求报错。共享超时或调用者取消是**整体失败**，即使某一路已经成功，也不返回部分结果。
-- 两个开关关闭时走原生官方提供方，保留其 endpoint、API Key/账号鉴权与请求记录。这是明确的用户配置，不是错误后的静默降级。仍需已有可用的 DeepSeek API Key 或账号授权；未配置可用鉴权时明确报告官方缺凭据错误，不会创建新 Key，也不会偷偷回退到 Codex/Z.AI。
+- 官方与所选增强并行调用。结果按官方、OpenAI、ZAI 的顺序轮流取一个尚未出现的 URL，去重后再轮到下一路，最终只保留工具请求的**总体结果上限**，不是每路各占一份上限。
+- 去重键忽略 URL fragment 与非根路径末尾斜杠，引用保留提供方原始 URL。默认工具上限为 8，显式请求的 `maxResults` 仍由原生工具/搜索服务约束。
+- 任一路普通失败时，只要另一路成功，就保留成功结果并公开失败后端与安全错误代码。官方缺凭据也遵循这条规则：增强仍可返回部分结果，但官方不会被算作成功。
+- 所有计划调用的后端都失败时整个请求报错。共享超时或调用者取消是**整体失败**，即使已有一路成功，也不返回部分结果。
 
-开关只暂存草稿，保存前可以 **放弃修改**；离开页面也会丢弃未保存草稿。**恢复默认**重新继承部署层默认值，本包默认只开 Codex。
+开关只暂存草稿，保存前可以 **放弃修改**；离开页面也会丢弃未保存草稿。**恢复默认**重新继承部署层默认增强，本包默认仅开启 Codex 增强，官方始终保留。
+
+## 原生展开、来源标记与动态状态
+
+完成后展开原生搜索调用栏，查看原生编号来源列表、可点击链接、短摘录与日期。不修改官方工具 schema、调用栏 DisclosureRow 或来源列表组件。
+
+- 每条来源在已有 `title` 中携带短标签，例如 `[官方] 原标题`、`[OpenAI] 原标题`、`[ZAI] 原标题`；同一条查询的同 URL 来源可合并为 `[官方 + OpenAI + ZAI] 原标题`。标签只表示实际返回该 URL 的后端，不把失败后端算入来源。
+- 仍只返回原生四个来源字段 `url`、`title`、`snippet`、`publishedAt`，不添加依赖插件渲染的 `source.provider` 字段。URL 保持可点击，缺标题时以 hostname 补足标注标题。
+- 所有后端的原始长 `content` / Codex raw output 都不转发。最终 `content` 仅为 router 自己生成的一行提供方结果计数与失败代码；不复制后端原始摘要、wire 数据或错误消息。
+- 来源并集只覆盖**同一条查询**。多条 `queries[]` 由原生工具继续去重，重复 URL 保留原生 first winner；不能宣称穷尽合并了所有跨查询来源。
+- 动态展示沿用原生 preparing/running → 最终 `tool/result`，完成结果自然更新并可展开。DSH `0.2.1-alpha.1` 没有该搜索契约的公开逐来源 stream writer；本版本**不模拟逐条增量来源、不追加假 tool/result、不承诺流式搜索来源**。
+- PTC 的嵌套工具调用不会生成原生根调用 presentation metadata，因此仍使用原生通用文本/value fallback；保留相同短标签与安全内容，不承诺 PTC 子调用拥有根调用同款 WebBlock。
+
+新结果的来源标签随原生 `tool/result.meta.sources` 和模型可见文本持久化，不依赖本插件客户端解释。卸载整个 bundle 后应仍由原生历史组件展示；实际卸载与冷加载需在隔离环境验收后再声明已验证。旧历史若没有来源事实，不追溯猜测标记或改写日志。
 
 ## 安装
 
-先在独立 `DSH_HOME` 验收，再安装到目标 Web profile。打包 `0.2.1` 使用新的目录，不覆盖之前的产物：
+先在独立 `DSH_HOME` 验收，再安装到目标 Web profile。打包 `0.3.0` 使用新的目录，不覆盖之前的产物：
 
 ```sh
 PACK_DIR="$(mktemp -d /tmp/dsh-web-search-pack.XXXXXX)"
 npm pack --pack-destination "${PACK_DIR:?}"
 # 在已安装 dsh 的主机上：
-npm_config_auto_install_peers=false dsh plugin --profile web add "${PACK_DIR:?}/dsh-web-search-0.2.1.tgz"
+npm_config_auto_install_peers=false dsh plugin --profile web add "${PACK_DIR:?}/dsh-web-search-0.3.0.tgz"
 ```
 
 安装命令仅对这一次 `dsh plugin add` 设置 `npm_config_auto_install_peers=false`：DSH peer 包由正在运行的 Host 提供，避免在 profile 中自动安装第二份 DSH 类库而造成跨副本类型身份不一致。不修改全局 npm/pnpm 配置；CI 或独立源码开发中的普通 `npm install` 仍正常安装所需 peers。
@@ -76,13 +89,13 @@ npm_config_auto_install_peers=false dsh plugin --profile web add "${PACK_DIR:?}/
     timeoutMs: 60000
 ```
 
-`searchProviders` 只接受 `openai-codex`、`zai`：单元素开启一路，双元素组合，显式 `[]` 使用官方搜索。省略该字段时继承默认 `['openai-codex']`。它取代原来的单选字段 `defaultProvider`；修改先前的孤立验收配置时，应移除旧字段并使用新数组。
+`searchProviders` 只描述附加增强，接受 `openai-codex`、`zai`：单元素为官方加一路增强，双元素为官方加两路增强，显式 `[]` 仅保留官方。省略时继承默认 `['openai-codex']`，实际调用官方 + Codex。它取代旧单选字段 `defaultProvider`；先前的孤立验收配置应移除旧字段并使用新数组。
 
-`searchProviders`、`timeoutMs` 和遗留 reader 的 `zreadEndpoint` 是实时 Config 字段。`enabledProviders` 是普通部署 allowlist，不是用户的组合开关，改变它遵循 Loader 重载生命周期。覆盖整项 `config` 时应保留仍需使用的字段。禁用的后端、缺少凭据或错误配置不会触发未选中后端。
+`searchProviders`、`timeoutMs` 和遗留 reader 的 `zreadEndpoint` 是实时 Config 字段。`enabledProviders` 是普通部署 allowlist，不是用户的增强开关，改变它遵循 Loader 重载生命周期。应保留 `deepseek-official` 基线；运维禁用或缺凭据会公开相应失败，不会伪装成功或调用未选中的增强。覆盖整项 `config` 时应保留仍需使用的字段。
 
 ### 运维覆盖
 
-本包将原生 `web.searchProvider` 默认配置为 `dsh-provider-hub`；hub 每次搜索读取 `searchProviders`。Codex/Z.AI 同时以各自 id 注册为原生提供方，DeepSeek 由官方插件注册。
+本包将原生 `web.searchProvider` 默认配置为 `dsh-provider-hub`；hub 每条查询保留官方并读取 `searchProviders` 追加增强。Codex/Z.AI 同时以各自 id 注册为原生提供方，DeepSeek 由官方插件注册。
 
 Bundle 默认采用：
 
@@ -93,7 +106,7 @@ Bundle 默认采用：
     fetchProvider: http
 ```
 
-启动环境的 `DSH_WEB_SEARCH_PROVIDER=openai-codex`、`zai` 或 `deepseek-official` 可直接固定原生提供方。profile/home patch 中显式配置其他 `web.searchProvider` 也可能覆盖 bundle；**此时设置卡保存的组合开关不决定实际后端**，卡片会提示这一部署边界。沿用原生 `config.searchProvider ?? env` 选择机制，不在 hub 内再建立隐藏的环境变量优先级。缺少显式指定的提供方会明确报错。`web.fetchProvider` 不受组合开关影响。
+启动环境的 `DSH_WEB_SEARCH_PROVIDER=openai-codex`、`zai` 或 `deepseek-official` 可直接固定原生提供方。profile/home patch 中显式配置其他 `web.searchProvider` 也可能覆盖 bundle；**这是独立的运维路由，绕过默认 hub 的“官方 + 所选增强”，设置卡保存的组合开关不决定实际后端**。例如显式固定 `openai-codex` 时只调用该固定路由，不应与 UI 增强开关混为一谈；卡片会提示这一部署边界。沿用原生 `config.searchProvider ?? env` 选择机制，不在 hub 内再建立隐藏的环境变量优先级。缺少显式指定的提供方会明确报错。`web.fetchProvider` 不受组合开关影响。
 
 ### 遗留 Google / zread 路由
 
@@ -110,6 +123,8 @@ Z.AI 官方 zread MCP 的 tool 契约不保证支持通用网页 URL，不能仅
 ## 登录
 
 Models 页面中只有 `llm-pi-ai` 的 ChatGPT/Codex provider 行显示本插件的账号授权区。按钮启动 DSH authorization flow；授权状态、外部页面、device code 与手工确认分层展示。等待授权时不能重复启动；可以取消本页面拥有的 attempt。
+
+本插件不修改 Settings 私有父布局；窄屏可用性仍取决于原生壳，不能仅凭无横向溢出认为通过移动端验收。
 
 插件不复制 OAuth/PKCE 实现。浏览器回调、device code、手工 code 和刷新逻辑仍由 `ctx.authorization` / pi-ai 负责。Remote bridge 只把通知、提示和取消动作交给 WebUI。
 

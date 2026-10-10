@@ -5,9 +5,11 @@ import { WebError } from '@deepseek-ai/dsh-web'
 import { createSearchProvider, PROVIDERS, ROUTER_PROVIDER_ID } from '../lib/providers.js'
 import { SearchError } from '../lib/search.js'
 
-const outcome = label => ({ content: label, sources: [{ url: `https://example.invalid/${label}` }], truncated: false })
+const source = (id, extra = {}) => ({ url: `https://example.invalid/${id}`, title: `Result ${id}`, ...extra })
+const outcome = id => ({ content: `RAW_BACKEND_CONTENT_${id}`, sources: [source(id)], truncated: false })
+const empty = () => ({ content: 'RAW_BACKEND_EMPTY_ANSWER', sources: [], truncated: false })
 const config = overrides => ({ searchProviders: ['openai-codex'], enabledProviders: [...PROVIDERS], timeoutMs: 60000, ...overrides })
-const officialContext = provider => ({ web: { searchProviders: new Map(provider ? [['deepseek-official', provider]] : []) } })
+const officialContext = (provider = { available: () => true, search: async () => empty() }) => ({ web: { searchProviders: new Map(provider ? [['deepseek-official', provider]] : []) } })
 const pendingUntilAbort = (_ctx, _query, _options, signal) => new Promise((resolve, reject) => {
   if (signal.aborted) return reject(signal.reason)
   signal.addEventListener('abort', () => reject(signal.reason), { once: true })
@@ -15,446 +17,340 @@ const pendingUntilAbort = (_ctx, _query, _options, signal) => new Promise((resol
 const isCode = code => error => error instanceof WebError && error.code === code
 const settled = () => new Promise(resolve => setImmediate(resolve))
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done }); return { promise, resolve } }
-
-// Timeout signals are unref'ed; a bounded test interval keeps pending adapters alive.
+const assertNoRaw = value => assert.doesNotMatch(JSON.stringify(value), /RAW_BACKEND_/u)
+const titles = result => result.sources.map(item => item.title)
 async function withTimer(operation) {
   const keepAlive = setInterval(() => {}, 1000)
   try { return await operation() } finally { clearInterval(keepAlive) }
 }
 
-test('router is a native provider and rereads independent selections on each call', async () => {
-  let current = config()
-  const calls = []
-  const router = createSearchProvider(officialContext(), () => current, {
-    codexSearch: async (_ctx, query, options, signal) => { calls.push({ provider: 'openai-codex', query, options, signal }); return outcome('codex') },
-    zaiSearch: async (_ctx, query, options, signal) => { calls.push({ provider: 'zai', query, options, signal }); return outcome('zai') },
+test('official always runs while optional selections reread shared settings on every call', async () => {
+  let current = config(); const calls = []
+  const official = { available: () => true, search: async (request, signal) => { calls.push(['official', request.query, request.maxResults]); assert.ok(signal instanceof AbortSignal); return outcome('official') } }
+  const router = createSearchProvider(officialContext(official), () => current, {
+    codexSearch: async (_ctx, query, options) => { calls.push(['codex', query, options.maxResults]); return outcome('codex') },
+    zaiSearch: async (_ctx, query, options) => { calls.push(['zai', query, options.maxResults]); return outcome('zai') },
   })
   assert.equal(router.id, ROUTER_PROVIDER_ID)
-  assert.equal(typeof router.available, 'function')
-  assert.equal((await router.search({ query: 'first', maxResults: 3 })).content, 'codex')
+  const first = await router.search({ query: 'first', maxResults: 3 })
   current = config({ searchProviders: ['zai'] })
-  assert.equal((await router.search({ query: 'second', maxResults: 5 })).content, 'zai')
-  assert.deepEqual(calls.map(call => [call.provider, call.query, call.options.maxResults]), [['openai-codex', 'first', 3], ['zai', 'second', 5]])
-  assert.ok(calls.every(call => call.signal instanceof AbortSignal))
+  const second = await router.search({ query: 'second', maxResults: 5 })
+  assert.deepEqual(calls, [['official', 'first', 3], ['codex', 'first', 3], ['official', 'second', 5], ['zai', 'second', 5]])
+  assert.deepEqual(titles(first), ['[官方] Result official', '[OpenAI] Result codex'])
+  assert.deepEqual(titles(second), ['[官方] Result official', '[ZAI] Result zai'])
+  assertNoRaw(first); assertNoRaw(second)
 })
 
-test('both toggles off call the official provider directly without recursive seam dispatch', async () => {
+test('zero enhancements call official only without recursion and still mark provenance', async () => {
   let seen
   const ctx = officialContext({ available: () => true, search: async (request, signal) => { seen = { request, signal }; return outcome('official') } })
   ctx.web.search = () => { throw new Error('recursive ctx.web.search is forbidden') }
-  const router = createSearchProvider(ctx, () => config({ searchProviders: [] }))
-  const result = await router.search({ query: ' official query ', maxResults: 2 }, new AbortController().signal)
-  assert.equal(result.content, 'official')
+  const result = await createSearchProvider(ctx, () => config({ searchProviders: [] })).search({ query: ' official query ', maxResults: 2 })
   assert.deepEqual(seen.request, { query: 'official query', maxResults: 2 })
   assert.equal(seen.signal.aborted, false)
+  assert.equal(result.sources[0].title, '[官方] Result official')
+  assert.equal(result.content, '搜索来源：官方 1 条。合并去重后展示 1 条。')
+  assertNoRaw(result)
 })
 
-test('both toggles off preserve legitimate official source URLs longer than adapter metadata bounds', async () => {
+test('official-only long citation URLs survive without adapter metadata length limits', async () => {
   const longUrl = `https://example.invalid/document/${'a'.repeat(2500)}?section=full#citation`
   const ctx = officialContext({ available: () => true, search: async () => ({ sources: [{ url: longUrl, title: 'Long official citation' }], truncated: false }) })
-  const result = await createSearchProvider(ctx, () => config({ searchProviders: [] })).search({ query: 'official long URL', maxResults: 1 })
+  const result = await createSearchProvider(ctx, () => config({ searchProviders: [] })).search({ query: 'long URL', maxResults: 1 })
   assert.equal(result.sources[0].url, longUrl)
-  assert.equal(result.sources[0].title, 'Long official citation')
+  assert.equal(result.sources[0].title, '[官方] Long official citation')
   assert.equal(result.truncated, false)
 })
 
-test('fixed reader route retains default source bound and deployment endpoint independently of toggle selections', async () => {
-  let options
-  const router = createSearchProvider(officialContext(), () => config({ searchProviders: [], zreadEndpoint: 'https://reader.invalid/?url={url}' }), {
-    googleZreadSearch: async (_ctx, query, value) => { assert.equal(query, 'query'); options = value; return outcome('reader') },
-  }, 'google-zread')
-  await router.search({ query: 'query' })
-  assert.equal(options.maxResults, 8)
-  assert.equal(options.endpoint, 'https://reader.invalid/?url={url}')
+test('all three routes start before any completes and share one cancellation signal', async () => {
+  const starts = []; const signals = []; const gates = [deferred(), deferred(), deferred()]
+  const start = (id, index, signal) => { starts.push(id); signals.push(signal); return gates[index].promise }
+  const ctx = officialContext({ available: () => true, search: (request, signal) => { assert.equal(request.maxResults, 4); return start('official', 0, signal) } })
+  const router = createSearchProvider(ctx, () => config({ searchProviders: ['openai-codex', 'zai'] }), {
+    codexSearch: (_ctx, query, options, signal) => { assert.equal(query, 'parallel'); assert.equal(options.maxResults, 4); return start('codex', 1, signal) },
+    zaiSearch: (_ctx, _query, _options, signal) => start('zai', 2, signal),
+  })
+  const task = router.search({ query: 'parallel', maxResults: 4 }); await settled()
+  const beforeRelease = [...starts]
+  gates[2].resolve(outcome('zai')); gates[1].resolve(outcome('codex')); gates[0].resolve(outcome('official'))
+  const result = await task
+  assert.deepEqual(beforeRelease, ['official', 'codex', 'zai'])
+  assert.ok(signals.every(signal => signal === signals[0]))
+  assert.deepEqual(titles(result), ['[官方] Result official', '[OpenAI] Result codex', '[ZAI] Result zai'])
 })
 
-test('inflight calls copy their toggle snapshot while later calls see in-place array edits', async () => {
-  const current = config()
-  const gate = deferred()
-  let codexCalls = 0
-  let zaiCalls = 0
-  const router = createSearchProvider(officialContext(), () => current, {
-    codexSearch: async () => { codexCalls++; return codexCalls === 1 ? gate.promise : outcome('later-codex') },
-    zaiSearch: async () => { zaiCalls++; return outcome('new-selection') },
+test('three-route round-robin uses a fair total cap with per-route unique counts', async () => {
+  const rows = id => ({ content: `RAW_BACKEND_${id}`, sources: [1, 2, 3, 4].map(rank => source(`${id}-${rank}`)), truncated: false })
+  const router = createSearchProvider(officialContext({ available: () => true, search: async () => rows('official') }), () => config({ searchProviders: ['openai-codex', 'zai'] }), { codexSearch: async () => rows('codex'), zaiSearch: async () => rows('zai') })
+  const result = await router.search({ query: 'fair', maxResults: 8 })
+  assert.deepEqual(result.sources.map(item => item.url), ['official-1', 'codex-1', 'zai-1', 'official-2', 'codex-2', 'zai-2', 'official-3', 'codex-3'].map(id => source(id).url))
+  assert.equal(result.truncated, true)
+  assert.equal(result.content, '搜索来源：官方 4 条；OpenAI 4 条；ZAI 4 条。合并去重后展示 8 条。')
+  assertNoRaw(result)
+})
+
+test('canonical duplicate URLs union actual origins in fixed order without rewriting original URL', async () => {
+  const original = 'https://example.invalid/article/#official'
+  const router = createSearchProvider(officialContext({ available: () => true, search: async () => ({ sources: [{ url: original, title: 'Original citation' }], truncated: false }) }), () => config({ searchProviders: ['zai', 'openai-codex'] }), {
+    codexSearch: async () => ({ sources: [{ url: 'https://example.invalid/article#openai' }], truncated: false }),
+    zaiSearch: async () => ({ sources: [{ url: 'https://example.invalid/article///#zai' }], truncated: false }),
   })
-  const first = router.search({ query: 'inflight' })
-  await settled()
-  current.searchProviders.push('zai')
-  const second = await router.search({ query: 'later' })
-  gate.resolve(outcome('old-selection'))
-  assert.equal((await first).content, 'old-selection')
-  assert.match(second.content, /new-selection/u)
+  const result = await router.search({ query: 'origins', maxResults: 8 })
+  assert.equal(result.sources.length, 1)
+  assert.equal(result.sources[0].url, original)
+  assert.equal(result.sources[0].title, '[官方 + OpenAI + ZAI] Original citation')
+  assert.equal(result.truncated, false)
+})
+
+test('a duplicate beyond the output cap still augments origins of the retained source', async () => {
+  const router = createSearchProvider(officialContext({ available: () => true, search: async () => ({ sources: [source('shared')], truncated: false }) }), () => config({ searchProviders: ['openai-codex', 'zai'] }), {
+    codexSearch: async () => ({ sources: [...Array.from({ length: 20 }, (_, index) => source(`codex-${index}`)), { url: `${source('shared').url}/#late-openai` }], truncated: false }),
+    zaiSearch: async () => ({ sources: [source('zai-first'), { url: `${source('shared').url}#late-zai` }], truncated: false }),
+  })
+  const result = await router.search({ query: 'late union', maxResults: 1 })
+  assert.equal(result.sources[0].title, '[官方 + OpenAI + ZAI] Result shared')
+  assert.equal(result.sources.length, 1)
+  assert.equal(result.truncated, true)
+})
+
+test('duplicate toggle ids dispatch once and duplicate-only rows are not falsely truncated', async () => {
+  const calls = []; const shared = source('shared')
+  const router = createSearchProvider(officialContext({ available: () => true, search: async () => { calls.push('official'); return { sources: [shared, shared], truncated: false } } }), () => config({ searchProviders: ['openai-codex', 'openai-codex', 'zai', 'zai'] }), {
+    codexSearch: async () => { calls.push('codex'); return { sources: [shared], truncated: false } }, zaiSearch: async () => { calls.push('zai'); return { sources: [shared], truncated: false } },
+  })
+  const result = await router.search({ query: 'duplicates', maxResults: 1 })
+  assert.deepEqual(calls, ['official', 'codex', 'zai'])
+  assert.equal(result.sources[0].title, '[官方 + OpenAI + ZAI] Result shared')
+  assert.equal(result.content, '搜索来源：官方 1 条；OpenAI 1 条；ZAI 1 条。合并去重后展示 1 条。')
+  assert.equal(result.truncated, false)
+})
+
+test('metadata is whitelisted, bounded and stripped of control, bidi and excess whitespace', async () => {
+  const router = createSearchProvider(officialContext(), () => config(), { codexSearch: async () => ({ content: 'RAW_BACKEND_MALICIOUS_MARKDOWN', sources: [{ url: source('metadata').url, title: `  Spaced\n\t\u202e title ${'x'.repeat(600)}  `, snippet: `  summary\n\t\u2066 ${'y'.repeat(800)}  `, publishedAt: ' 2026-10-10 ', provider: 'fake-origin', arbitrary: 'SYNTHETIC_SOURCE_EXTRA' }], truncated: false }) })
+  const result = await router.search({ query: 'metadata' }); const row = result.sources[0]
+  assert.deepEqual(Object.keys(row).sort(), ['publishedAt', 'snippet', 'title', 'url'])
+  assert.match(row.title, /^\[OpenAI\] /u)
+  assert.ok(row.title.length <= 250); assert.ok(row.snippet.length <= 300)
+  assert.doesNotMatch(row.title + row.snippet, /[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]| {2,}/u)
+  assertNoRaw(result); assert.doesNotMatch(JSON.stringify(result), /SYNTHETIC_SOURCE_EXTRA|fake-origin/u)
+})
+
+test('inflight selection snapshots resist in-place edits while later calls see the new enhancement', async () => {
+  const current = config(); const gate = deferred(); let codexCalls = 0; let zaiCalls = 0
+  const router = createSearchProvider(officialContext(), () => current, { codexSearch: async () => { codexCalls++; return codexCalls === 1 ? gate.promise : outcome('later-codex') }, zaiSearch: async () => { zaiCalls++; return outcome('later-zai') } })
+  const first = router.search({ query: 'first' }); await settled(); current.searchProviders.push('zai')
+  const second = await router.search({ query: 'second' }); gate.resolve(outcome('old-codex'))
+  assert.deepEqual((await first).sources.map(item => item.url), [source('old-codex').url])
+  assert.deepEqual(second.sources.map(item => item.url), [source('later-codex').url, source('later-zai').url])
   assert.equal(zaiCalls, 1)
 })
 
-test('both providers genuinely start before either completes and receive one shared signal', async () => {
-  const starts = []
-  const gates = [deferred(), deferred()]
-  const signals = []
-  const adapter = (id, index) => (_ctx, query, options, signal) => {
-    starts.push(id); signals.push(signal)
-    assert.equal(query, 'parallel query')
-    assert.equal(options.maxResults, 4)
-    return gates[index].promise
+test('an optional failure never cancels siblings and exposes only a safe short router status', async () => {
+  const secret = 'SYNTHETIC_ERROR_SECRET'; const gate = deferred(); let siblingSignal
+  const router = createSearchProvider(officialContext({ available: () => true, search: async () => outcome('official') }), () => config({ searchProviders: ['openai-codex', 'zai'] }), {
+    codexSearch: async () => { throw new SearchError(`Credential ${secret}`, 'CREDENTIAL_MISSING') }, zaiSearch: async (_ctx, _query, _options, signal) => { siblingSignal = signal; return gate.promise },
+  })
+  const task = router.search({ query: 'partial' }); await settled(); assert.equal(siblingSignal.aborted, false); gate.resolve(outcome('zai'))
+  const result = await task
+  assert.deepEqual(titles(result), ['[官方] Result official', '[ZAI] Result zai'])
+  assert.match(result.content, /OpenAI未成功（WEB_PROVIDER_CREDENTIAL_MISSING）/u)
+  assert.doesNotMatch(JSON.stringify(result), new RegExp(secret, 'u')); assertNoRaw(result)
+})
+
+test('official available without credentials is an actual failure, not an invented official success', async () => {
+  let officialCalls = 0
+  const router = createSearchProvider(officialContext({ available: () => true, search: async () => { officialCalls++; throw new WebError('Synthetic credential missing', 'WEB_PROVIDER_CREDENTIAL_MISSING') } }), () => config({ searchProviders: ['zai'] }), { zaiSearch: async () => outcome('zai') })
+  const result = await router.search({ query: 'official unavailable' })
+  assert.equal(officialCalls, 1); assert.deepEqual(titles(result), ['[ZAI] Result zai'])
+  assert.match(result.content, /官方未成功（WEB_PROVIDER_CREDENTIAL_MISSING）/u); assertNoRaw(result)
+})
+
+test('all three failures yield ALL_FAILED without raw messages or arbitrary provider codes', async () => {
+  const secret = 'SYNTHETIC_ALL_FAILED_SECRET'
+  const router = createSearchProvider(officialContext({ available: () => true, search: async () => { throw new WebError(secret, 'WEB_PROVIDER_ERROR') } }), () => config({ searchProviders: ['openai-codex', 'zai'] }), { codexSearch: async () => { throw new SearchError(secret, 'CREDENTIAL_MISSING') }, zaiSearch: async () => { throw new Error(secret) } })
+  await assert.rejects(router.search({ query: 'all failed' }), error => { assert.ok(isCode('WEB_PROVIDER_ALL_FAILED')(error)); assert.equal(error.message, 'All search providers failed'); assert.equal(error.cause, undefined); return true })
+})
+
+test('successful empty results do not become ALL_FAILED and raw empty answers are not returned', async () => {
+  const router = createSearchProvider(officialContext(), () => config({ searchProviders: ['openai-codex', 'zai'] }), { codexSearch: async () => empty(), zaiSearch: async () => { throw new Error('Synthetic failed route') } })
+  const result = await router.search({ query: 'empty success' })
+  assert.deepEqual(result.sources, []); assert.match(result.content, /WEB_PROVIDER_ERROR/u); assertNoRaw(result)
+})
+
+test('invalid selection types and disabled routes reject before any provider dispatch', async () => {
+  let current = config(); let calls = 0
+  const router = createSearchProvider(officialContext({ available: () => true, search: async () => { calls++; return empty() } }), () => current, { codexSearch: async () => { calls++; return empty() } })
+  for (const searchProviders of [null, 'openai-codex', {}, ['unknown'], ['deepseek-official'], ['google-zread']]) { current = config({ searchProviders }); await assert.rejects(router.search({ query: 'invalid' }), isCode('WEB_PROVIDER_CONFIG')) }
+  current = config({ searchProviders: ['openai-codex', 'zai'], enabledProviders: ['deepseek-official', 'openai-codex'] })
+  await assert.rejects(router.search({ query: 'disabled' }), isCode('WEB_PROVIDER_CONFIGURED_UNAVAILABLE')); assert.equal(calls, 0)
+})
+
+test('official-only missing or unavailable registration fails without silent fallback', async () => {
+  const selected = () => config({ searchProviders: [] })
+  await assert.rejects(createSearchProvider(officialContext(null), selected).search({ query: 'missing' }), isCode('WEB_PROVIDER_CONFIGURED_MISSING'))
+  await assert.rejects(createSearchProvider(officialContext({ available: () => false, search: async () => empty() }), selected).search({ query: 'unavailable' }), isCode('WEB_PROVIDER_CONFIGURED_UNAVAILABLE'))
+})
+
+test('fixed operational override is a single route with provenance, safe status and no official dispatch', async () => {
+  let options
+  const ctx = officialContext({ available: () => true, search: async () => { throw new Error('fixed direct must not call official') } })
+  const reader = createSearchProvider(ctx, () => config({ searchProviders: [], zreadEndpoint: 'https://reader.invalid/?url={url}' }), { googleZreadSearch: async (_ctx, _query, value) => { options = value; return outcome('reader') } }, 'google-zread')
+  const result = await reader.search({ query: 'reader' })
+  assert.equal(options.maxResults, 8); assert.equal(options.endpoint, 'https://reader.invalid/?url={url}')
+  assert.equal(result.sources[0].title, '[Google] Result reader'); assertNoRaw(result)
+  const codex = createSearchProvider(ctx, () => config({ searchProviders: ['zai'] }), { codexSearch: async () => outcome('codex') }, 'openai-codex')
+  assert.equal((await codex.search({ query: 'direct' })).sources[0].title, '[OpenAI] Result codex')
+})
+
+test('direct single-provider errors retain public codes but strip HTTP and MCP secret echoes', async () => {
+  const secret = 'SYNTHETIC_DIRECT_ERROR_SECRET'
+  for (const failure of [new SearchError(`HTTP Bearer ${secret}`, 'CREDENTIAL_MISSING'), new SearchError(`MCP ${secret}`, 'PROVIDER_ERROR'), new Error(secret)]) {
+    const router = createSearchProvider(officialContext(), () => config(), { codexSearch: async () => { throw failure } }, 'openai-codex')
+    await assert.rejects(router.search({ query: 'safe error' }), error => { assert.ok(error instanceof WebError); assert.doesNotMatch(error.message, new RegExp(secret, 'u')); assert.equal(error.cause, undefined); return true })
   }
-  const router = createSearchProvider(officialContext(), () => config({ searchProviders: ['openai-codex', 'zai'] }), {
-    codexSearch: adapter('openai-codex', 0), zaiSearch: adapter('zai', 1),
-  })
-  const task = router.search({ query: 'parallel query', maxResults: 4 })
-  await settled()
-  const admittedBeforeRelease = [...starts]
-  gates[1].resolve(outcome('zai-answer'))
-  gates[0].resolve(outcome('codex-answer'))
-  const result = await task
-  assert.deepEqual(admittedBeforeRelease, ['openai-codex', 'zai'])
-  assert.equal(signals[0], signals[1])
-  assert.match(result.content, /codex-answer/u)
-  assert.match(result.content, /zai-answer/u)
 })
 
-test('combined results round-robin across providers, deduplicate URLs, and honor a total source cap', async () => {
-  const source = suffix => ({ url: `https://example.invalid/${suffix}` })
-  const router = createSearchProvider(officialContext(), () => config({ searchProviders: ['openai-codex', 'zai'] }), {
-    codexSearch: async () => ({ content: 'codex answer', sources: [source('shared'), source('a2'), source('a3'), source('a4')], truncated: false }),
-    zaiSearch: async () => ({ content: 'zai answer', sources: [source('shared'), source('b2'), source('b3'), source('b4')], truncated: false }),
-  })
-  const result = await router.search({ query: 'query', maxResults: 4 })
-  assert.deepEqual(result.sources.map(source => source.url), ['shared', 'b2', 'a2', 'b3'].map(id => `https://example.invalid/${id}`))
-  assert.equal(result.truncated, true)
-  assert.match(result.content, /codex answer/u)
-  assert.match(result.content, /zai answer/u)
+test('malformed backend values fail that route without corrupting successful sibling sources', async () => {
+  const malformed = [null, undefined, {}, { sources: {} }, { sources: [null] }, { sources: [{}] }, { sources: [{ url: 'javascript:alert(1)' }] }, { sources: [{ url: 'ftp://example.invalid/' }] }, { sources: [{ url: source('bad').url, title: 42 }] }, { sources: [{ url: source('bad').url, snippet: false }] }, { sources: [{ url: source('bad').url, publishedAt: [] }] }, { sources: [], content: 42 }, { sources: [], truncated: 'true' }]
+  for (const value of malformed) {
+    const adapters = { codexSearch: async () => value, zaiSearch: async () => outcome('good-zai') }
+    await assert.rejects(createSearchProvider(officialContext(), () => config(), adapters, 'openai-codex').search({ query: 'bad shape' }), isCode('WEB_PROVIDER_ERROR'))
+    const result = await createSearchProvider(officialContext(), () => config({ searchProviders: ['openai-codex', 'zai'] }), adapters).search({ query: 'partial shape' })
+    assert.deepEqual(titles(result), ['[ZAI] Result good-zai']); assert.match(result.content, /WEB_PROVIDER_ERROR/u)
+  }
 })
 
-test('duplicate provider toggles dispatch each backend once and duplicate-only lists are not truncated', async () => {
-  const calls = []
-  const source = { url: 'https://example.invalid/shared' }
-  const router = createSearchProvider(officialContext(), () => config({ searchProviders: ['openai-codex', 'openai-codex', 'zai', 'zai'] }), {
-    codexSearch: async () => { calls.push('codex'); return { sources: [source, source], truncated: false } },
-    zaiSearch: async () => { calls.push('zai'); return { sources: [source], truncated: false } },
-  })
-  const result = await router.search({ query: 'duplicates', maxResults: 1 })
-  assert.deepEqual(calls, ['codex', 'zai'])
-  assert.deepEqual(result.sources, [source])
-  assert.equal(result.truncated, false)
+test('a sparse source array fails only that route and leaves successful siblings intact', async () => {
+  const sparse = new Array(2)
+  sparse[1] = source('unusable-sparse-row')
+  const router = createSearchProvider(officialContext(), () => config({ searchProviders: ['openai-codex', 'zai'] }), { codexSearch: async () => ({ sources: sparse, truncated: false }), zaiSearch: async () => outcome('good-zai') })
+  const result = await router.search({ query: 'sparse route' })
+  assert.deepEqual(titles(result), ['[ZAI] Result good-zai'])
+  assert.match(result.content, /OpenAI未成功（WEB_PROVIDER_ERROR）/u)
 })
 
-test('combined URL deduplication ignores fragments and nonroot trailing slashes without rewriting source URLs', async () => {
-  const original = 'https://example.invalid/article/#codex'
-  const router = createSearchProvider(officialContext(), () => config({ searchProviders: ['openai-codex', 'zai'] }), {
-    codexSearch: async () => ({ sources: [{ url: original, title: 'Original citation' }, { url: 'https://example.invalid/?lang=en' }], truncated: false }),
-    zaiSearch: async () => ({ sources: [{ url: 'https://example.invalid/article#zai' }, { url: 'https://example.invalid/article///#again' }, { url: 'https://example.invalid/?lang=zh' }], truncated: false }),
-  })
-  const result = await router.search({ query: 'normalized URLs', maxResults: 8 })
-  assert.deepEqual(result.sources.map(source => source.url), [original, 'https://example.invalid/?lang=zh', 'https://example.invalid/?lang=en'])
-  assert.equal(result.sources[0].title, 'Original citation')
-  assert.equal(result.truncated, false)
+test('each source URL is read once so validation and projection use the same snapshot', async () => {
+  let reads = 0
+  const expected = source('snapshot').url
+  const row = { title: 'Snapshot citation', get url() { reads++; return reads === 1 ? expected : 'javascript:SYNTHETIC_PRIVATE_GETTER' } }
+  const router = createSearchProvider(officialContext(), () => config(), { codexSearch: async () => ({ sources: [row], truncated: false }) })
+  const result = await router.search({ query: 'URL getter' })
+  assert.equal(reads, 1)
+  assert.equal(result.sources[0].url, expected)
+  assert.doesNotMatch(JSON.stringify(result), /SYNTHETIC_PRIVATE_GETTER/u)
 })
 
-test('partial success exposes a failed provider code without leaking its secret-bearing error message', async () => {
-  const secret = 'SYNTHETIC_PRIVATE_TOKEN_NEVER_RENDER'
-  const router = createSearchProvider(officialContext(), () => config({ searchProviders: ['openai-codex', 'zai'] }), {
-    codexSearch: async () => { throw new SearchError(`Credential token=${secret}`, 'CREDENTIAL_MISSING') },
-    zaiSearch: async () => outcome('public-zai'),
-  })
-  const result = await router.search({ query: 'safe partial' })
-  assert.match(result.content, /WEB_PROVIDER_CREDENTIAL_MISSING/u)
-  assert.doesNotMatch(JSON.stringify(result), new RegExp(secret, 'u'))
-  assert.doesNotMatch(result.content, /Credential token=/u)
-})
-
-test('one ordinary failure does not abort a successful sibling and returns an explicit partial-results notice', async () => {
-  let siblingSignal
-  let siblingFinished = false
-  const gate = deferred()
-  const router = createSearchProvider(officialContext(), () => config({ searchProviders: ['openai-codex', 'zai'] }), {
-    codexSearch: async () => { throw new SearchError('Synthetic Codex failed', 'PROVIDER_ERROR') },
-    zaiSearch: async (_ctx, _query, _options, signal) => { siblingSignal = signal; const result = await gate.promise; siblingFinished = true; return result },
-  })
-  const task = router.search({ query: 'partial' })
-  await settled()
-  assert.equal(siblingSignal.aborted, false)
-  gate.resolve(outcome('successful-zai'))
-  const result = await task
-  assert.equal(siblingFinished, true)
-  assert.equal(result.sources[0].url, 'https://example.invalid/successful-zai')
-  assert.match(result.content, /successful-zai/u)
-  assert.match(result.content, /openai-codex|Codex/iu)
-  assert.match(result.content, /fail|partial|失败|部分/iu)
-})
-
-test('a successful empty result is not misclassified as all providers failed', async () => {
-  const router = createSearchProvider(officialContext(), () => config({ searchProviders: ['openai-codex', 'zai'] }), {
-    codexSearch: async () => ({ sources: [], truncated: false }),
-    zaiSearch: async () => { throw new SearchError('Synthetic ZAI unavailable', 'CREDENTIAL_MISSING') },
-  })
-  const result = await router.search({ query: 'no citations' })
-  assert.deepEqual(result.sources, [])
-  assert.match(result.content, /zai|Z\.AI/iu)
-})
-
-test('two ordinary failures produce WEB_PROVIDER_ALL_FAILED instead of hiding either provider', async () => {
-  const router = createSearchProvider(officialContext(), () => config({ searchProviders: ['openai-codex', 'zai'] }), {
-    codexSearch: async () => { throw new SearchError('Synthetic Codex denied', 'CREDENTIAL_MISSING') },
-    zaiSearch: async () => { throw new SearchError('Synthetic ZAI unavailable', 'PROVIDER_ERROR') },
-  })
-  await assert.rejects(router.search({ query: 'both failed' }), error => {
-    assert.ok(isCode('WEB_PROVIDER_ALL_FAILED')(error))
-    assert.match(error.message, /openai-codex|Codex/iu)
-    assert.match(error.message, /zai|Z\.AI/iu)
+test('typed error code is read once before allowlisting and cannot flip to a private code', async () => {
+  class NativeWebError extends Error {
+    constructor() { super('SYNTHETIC_PRIVATE_MESSAGE'); this.name = 'WebError' }
+    get code() { reads++; return reads === 1 ? 'WEB_PROVIDER_CREDENTIAL_MISSING' : 'SYNTHETIC_PRIVATE_CODE' }
+  }
+  let reads = 0
+  const failure = new NativeWebError()
+  const router = createSearchProvider(officialContext({ available: () => true, search: async () => { throw failure } }), () => config({ searchProviders: [] }))
+  await assert.rejects(router.search({ query: 'code getter' }), error => {
+    assert.equal(reads, 1)
+    assert.equal(error.code, 'WEB_PROVIDER_CREDENTIAL_MISSING')
+    assert.doesNotMatch(error.message + error.code, /SYNTHETIC_PRIVATE_/u)
     return true
   })
 })
 
-test('selection accepts only OpenAI/ZAI arrays, rejecting other types and ordinary DeepSeek/Google selection', async () => {
-  let calls = 0
-  let current = config()
-  const router = createSearchProvider(officialContext(), () => current, { codexSearch: async () => { calls++; return outcome('bad') } })
-  for (const searchProviders of [null, 'openai-codex', {}, ['unknown-provider'], ['deepseek-official'], ['google-zread']]) {
-    current = config({ searchProviders })
-    await assert.rejects(router.search({ query: 'query' }), isCode('WEB_PROVIDER_CONFIG'), JSON.stringify(searchProviders))
-  }
-  assert.equal(calls, 0)
+test('hostile Proxy prototype traps in a failed route cannot destroy a successful sibling', async () => {
+  const failure = new Proxy({}, { getPrototypeOf() { throw new Error('SYNTHETIC_PRIVATE_PROXY_TRAP') } })
+  const router = createSearchProvider(officialContext(), () => config({ searchProviders: ['openai-codex', 'zai'] }), { codexSearch: async () => { throw failure }, zaiSearch: async () => outcome('good-zai') })
+  const result = await router.search({ query: 'proxy error' })
+  assert.deepEqual(titles(result), ['[ZAI] Result good-zai'])
+  assert.match(result.content, /OpenAI未成功（WEB_PROVIDER_ERROR）/u)
+  assert.doesNotMatch(JSON.stringify(result), /SYNTHETIC_PRIVATE_PROXY_TRAP/u)
 })
 
-test('a deployment-disabled selection fails explicitly before any backend dispatch', async () => {
-  let calls = 0
-  const router = createSearchProvider(officialContext(), () => config({ searchProviders: ['openai-codex', 'zai'], enabledProviders: ['openai-codex'] }), {
-    codexSearch: async () => { calls++; return outcome('bad') }, zaiSearch: async () => { calls++; return outcome('bad') },
-  })
-  await assert.rejects(router.search({ query: 'query' }), isCode('WEB_PROVIDER_CONFIGURED_UNAVAILABLE'))
-  assert.equal(calls, 0)
+test('throwing native error name getters become a safe route failure rather than cancelling siblings', async () => {
+  const failure = new Error('SYNTHETIC_PRIVATE_NAME_MESSAGE')
+  Object.defineProperty(failure, 'name', { get() { throw new Error('SYNTHETIC_PRIVATE_NAME_TRAP') } })
+  const router = createSearchProvider(officialContext({ available: () => true, search: async () => { throw failure } }), () => config(), { codexSearch: async () => outcome('good-codex') })
+  const result = await router.search({ query: 'name getter' })
+  assert.deepEqual(titles(result), ['[OpenAI] Result good-codex'])
+  assert.match(result.content, /官方未成功（WEB_PROVIDER_ERROR）/u)
+  assert.doesNotMatch(JSON.stringify(result), /SYNTHETIC_PRIVATE_NAME/u)
 })
 
-test('missing or unavailable official fallback never silently chooses another backend', async () => {
-  const selected = () => config({ searchProviders: [] })
-  await assert.rejects(createSearchProvider(officialContext(), selected).search({ query: 'query' }), isCode('WEB_PROVIDER_CONFIGURED_MISSING'))
-  let calls = 0
-  const unavailable = officialContext({ available: () => false, search: async () => { calls++; return outcome('bad') } })
-  await assert.rejects(createSearchProvider(unavailable, selected).search({ query: 'query' }), isCode('WEB_PROVIDER_CONFIGURED_UNAVAILABLE'))
-  assert.equal(calls, 0)
-})
-
-test('single-provider credential failure retains its stable machine-readable code', async () => {
-  const router = createSearchProvider(officialContext(), () => config(), { codexSearch: async () => { throw new SearchError('Synthetic credential is missing', 'CREDENTIAL_MISSING') } })
-  await assert.rejects(router.search({ query: 'query' }), error => error instanceof WebError && error.code === 'WEB_PROVIDER_CREDENTIAL_MISSING' && /Search credentials are missing/u.test(error.message))
-})
-
-test('single-provider backend error messages never expose secret-bearing HTTP or MCP echoes', async () => {
-  const secret = 'SYNTHETIC_SECRET_SINGLE_PROVIDER'
-  for (const failure of [new SearchError(`HTTP 401 Bearer ${secret}`, 'CREDENTIAL_MISSING'), new SearchError(`MCP echo ${secret}`, 'PROVIDER_ERROR'), new Error(`Transport echo ${secret}`)]) {
-    const router = createSearchProvider(officialContext(), () => config(), { codexSearch: async () => { throw failure } })
-    await assert.rejects(router.search({ query: 'safe error' }), error => {
-      assert.ok(error instanceof WebError)
-      assert.doesNotMatch(error.message, new RegExp(secret, 'u'))
-      assert.doesNotMatch(error.message, /HTTP 401|MCP echo|Transport echo/u)
-      return true
-    })
-  }
-})
-
-test('malformed result shapes are failed routes rather than corrupting a successful sibling', async () => {
-  const malformed = [
-    null, undefined, {}, { sources: {} }, { sources: [null] }, { sources: [{}] },
-    { sources: [{ url: 'javascript:alert(1)' }] }, { sources: [{ url: 'ftp://example.invalid/' }] },
-    { sources: [{ url: 'https://example.invalid/', title: 42 }] },
-    { sources: [{ url: 'https://example.invalid/', snippet: false }] },
-    { sources: [{ url: 'https://example.invalid/', publishedAt: [] }] },
-    { sources: [], content: 42 }, { sources: [], truncated: 'true' },
-  ]
-  for (const value of malformed) {
-    const adapters = { codexSearch: async () => value, zaiSearch: async () => outcome('well-formed-zai') }
-    const single = createSearchProvider(officialContext(), () => config(), adapters)
-    await assert.rejects(single.search({ query: 'invalid shape' }), isCode('WEB_PROVIDER_ERROR'))
-    const combined = createSearchProvider(officialContext(), () => config({ searchProviders: ['openai-codex', 'zai'] }), adapters)
-    const result = await combined.search({ query: 'invalid route and good sibling' })
-    assert.deepEqual(result.sources, outcome('well-formed-zai').sources)
-    assert.match(result.content, /WEB_PROVIDER_ERROR/u)
-  }
-})
-
-test('minimal valid provider shape accepts absent optional content and truncation fields', async () => {
-  const router = createSearchProvider(officialContext(), () => config(), { codexSearch: async () => ({ sources: [] }) })
-  assert.deepEqual(await router.search({ query: 'valid empty' }), { sources: [], truncated: false })
-})
-
-test('pre-aborted combined search never dispatches and inflight cancellation aborts both providers', async () => {
-  let calls = 0
-  const signals = []
-  const adapter = (...args) => { calls++; signals.push(args[3]); return pendingUntilAbort(...args) }
-  const router = createSearchProvider(officialContext(), () => config({ searchProviders: ['openai-codex', 'zai'] }), { codexSearch: adapter, zaiSearch: adapter })
-  await assert.rejects(router.search({ query: 'pre-cancelled' }, AbortSignal.abort()), isCode('WEB_ABORTED'))
-  assert.equal(calls, 0)
-  const controller = new AbortController()
-  const pending = router.search({ query: 'inflight' }, controller.signal)
-  await settled()
-  controller.abort(new Error('synthetic user cancellation'))
-  await assert.rejects(pending, isCode('WEB_ABORTED'))
-  assert.equal(calls, 2)
-  assert.ok(signals.every(signal => signal.aborted))
-})
-
-test('caller cancellation is fatal even after one backend already completed successfully', async () => {
-  const controller = new AbortController()
-  let ready
-  const started = new Promise(resolve => { ready = resolve })
-  const router = createSearchProvider(officialContext(), () => config({ searchProviders: ['openai-codex', 'zai'] }), {
-    codexSearch: async () => outcome('completed'),
-    zaiSearch: (...args) => { ready(); return pendingUntilAbort(...args) },
-  })
-  const task = router.search({ query: 'cancel partial' }, controller.signal)
-  await started
-  await settled()
-  controller.abort(new Error('user cancellation must win'))
-  await assert.rejects(task, isCode('WEB_ABORTED'))
-})
-
-test('fixed native direct providers ignore global toggle selections while honoring enablement', async () => {
-  let current = config({ searchProviders: ['zai'] })
-  const router = createSearchProvider(officialContext(), () => current, {
-    codexSearch: async () => outcome('fixed-codex'), zaiSearch: async () => { throw new Error('must not follow toggle selection') },
-  }, 'openai-codex')
-  assert.equal(router.id, 'openai-codex')
-  assert.equal((await router.search({ query: 'query' })).content, 'fixed-codex')
-  current = config({ searchProviders: [], enabledProviders: ['zai'] })
-  await assert.rejects(router.search({ query: 'query' }), isCode('WEB_PROVIDER_CONFIGURED_UNAVAILABLE'))
-})
-
-test('router normalizes queries and rejects blanks or oversized text before dispatch', async () => {
-  const queries = []
-  const router = createSearchProvider(officialContext(), () => config(), { codexSearch: async (_ctx, query) => { queries.push(query); return outcome('valid') } })
-  await router.search({ query: '  useful search  ' })
-  assert.deepEqual(queries, ['useful search'])
-  await assert.rejects(router.search({ query: '   ' }))
-  await assert.rejects(router.search({ query: 'x'.repeat(4097) }))
+test('query normalization and invalid limits reject before backend dispatch', async () => {
+  const queries = []; let current = config()
+  const router = createSearchProvider(officialContext(), () => current, { codexSearch: async (_ctx, query) => { queries.push(query); return outcome('valid') } })
+  await router.search({ query: '  useful query  ' }); assert.deepEqual(queries, ['useful query'])
+  for (const query of ['   ', 'x'.repeat(4097)]) await assert.rejects(router.search({ query }))
+  for (const maxResults of [-1, 1.5, NaN]) await assert.rejects(router.search({ query: 'query', maxResults }), isCode('WEB_PROVIDER_CONFIG'))
+  for (const timeoutMs of [0, 1.5, 300001]) { current = config({ timeoutMs }); await assert.rejects(router.search({ query: 'query' }), isCode('WEB_PROVIDER_CONFIG')) }
   assert.equal(queries.length, 1)
 })
 
-test('single results deduplicate over-returning adapters and honor a zero-result limit', async () => {
-  const router = createSearchProvider(officialContext(), () => config(), { codexSearch: async () => ({ sources: [{ url: 'https://a.invalid/' }, { url: 'https://a.invalid/' }, { url: 'https://b.invalid/' }, { url: 'https://c.invalid/' }], truncated: false }) })
-  const limited = await router.search({ query: 'query', maxResults: 2 })
-  assert.deepEqual(limited.sources.map(source => source.url), ['https://a.invalid/', 'https://b.invalid/'])
-  assert.equal(limited.truncated, true)
-  assert.deepEqual((await router.search({ query: 'query', maxResults: 0 })).sources, [])
+test('single and shared empty-sibling routes use the same canonical dedupe and truncation', async () => {
+  const rows = [source('article'), { url: `${source('article').url}/#second` }, source('other')]
+  const adapters = { codexSearch: async () => ({ sources: rows, truncated: false }), zaiSearch: async () => empty() }
+  const direct = await createSearchProvider(officialContext(), () => config(), adapters, 'openai-codex').search({ query: 'direct', maxResults: 2 })
+  const shared = await createSearchProvider(officialContext(), () => config({ searchProviders: ['openai-codex', 'zai'] }), adapters).search({ query: 'shared', maxResults: 2 })
+  assert.deepEqual(shared.sources, direct.sources); assert.equal(shared.truncated, false)
+  const zero = await createSearchProvider(officialContext(), () => config(), adapters).search({ query: 'zero', maxResults: 0 })
+  assert.deepEqual(zero.sources, []); assert.equal(zero.truncated, true)
 })
 
-test('single-provider canonical URL deduplication matches the same route beside an empty successful sibling', async () => {
-  const sources = [
-    { url: 'https://example.invalid/article#one' },
-    { url: 'https://example.invalid/article/#two' },
-    { url: 'https://example.invalid/article///#three' },
-    { url: 'https://example.invalid/#first' },
-    { url: 'https://example.invalid/#second' },
-  ]
-  const adapters = { codexSearch: async () => ({ content: 'original single answer', sources, truncated: false }), zaiSearch: async () => ({ sources: [], truncated: false }) }
-  const single = await createSearchProvider(officialContext(), () => config(), adapters).search({ query: 'canonical single', maxResults: 3 })
-  const combined = await createSearchProvider(officialContext(), () => config({ searchProviders: ['openai-codex', 'zai'] }), adapters).search({ query: 'empty sibling', maxResults: 3 })
-  assert.deepEqual(single.sources, [sources[0], sources[3]])
-  assert.equal(single.content, 'original single answer')
-  assert.equal(single.truncated, false)
-  assert.deepEqual(combined.sources, single.sources)
-  assert.equal(combined.truncated, single.truncated)
+test('pre-cancel dispatches nothing while inflight abort reaches all three routes', async () => {
+  const signals = []; let calls = 0
+  const pending = (...args) => { calls++; signals.push(args[3]); return pendingUntilAbort(...args) }
+  const ctx = officialContext({ available: () => true, search: (request, signal) => pending(null, request.query, request, signal) })
+  const router = createSearchProvider(ctx, () => config({ searchProviders: ['openai-codex', 'zai'] }), { codexSearch: pending, zaiSearch: pending })
+  await assert.rejects(router.search({ query: 'pre-cancelled' }, AbortSignal.abort()), isCode('WEB_ABORTED')); assert.equal(calls, 0)
+  const controller = new AbortController(); const task = router.search({ query: 'inflight' }, controller.signal)
+  await settled(); controller.abort(new Error('synthetic user cancellation'))
+  await assert.rejects(task, isCode('WEB_ABORTED')); assert.equal(calls, 3); assert.ok(signals.every(signal => signal.aborted))
 })
 
-test('invalid timeout and result limits fail before backend calls', async () => {
-  let calls = 0
-  let current = config()
-  const router = createSearchProvider(officialContext(), () => current, { codexSearch: async () => { calls++; return outcome('bad') } })
-  for (const maxResults of [-1, 1.5, NaN]) await assert.rejects(router.search({ query: 'query', maxResults }), isCode('WEB_PROVIDER_CONFIG'))
-  for (const timeoutMs of [0, 1.5, 300001]) { current = config({ timeoutMs }); await assert.rejects(router.search({ query: 'query' }), isCode('WEB_PROVIDER_CONFIG')) }
-  assert.equal(calls, 0)
-})
+test('caller cancellation and shared deadline stay fatal after another route has succeeded', async () => withTimer(async () => {
+  const router = createSearchProvider(officialContext({ available: () => true, search: async () => outcome('completed-official') }), () => config({ searchProviders: ['openai-codex', 'zai'], timeoutMs: 20 }), { codexSearch: async () => outcome('completed-codex'), zaiSearch: pendingUntilAbort })
+  await assert.rejects(router.search({ query: 'timeout' }), isCode('WEB_PROVIDER_TIMEOUT'))
+  const controller = new AbortController(); const task = router.search({ query: 'caller cancel' }, controller.signal)
+  await settled(); controller.abort(new Error('synthetic cancellation')); await assert.rejects(task, isCode('WEB_ABORTED'))
+}))
 
-test('typed native errors retain their explicit code for a single official fallback', async () => {
-  const router = createSearchProvider(officialContext({ available: () => true, search: async () => { throw new WebError('Synthetic rate limit', 'SYNTHETIC_RATE_LIMIT') } }), () => config({ searchProviders: [] }))
-  await assert.rejects(router.search({ query: 'query' }), isCode('SYNTHETIC_RATE_LIMIT'))
-})
+test('timeout retains the first reason when its listener subsequently aborts caller', async () => withTimer(async () => {
+  const controller = new AbortController(); let firstReason
+  const router = createSearchProvider(officialContext(), () => config({ timeoutMs: 10 }), { codexSearch: (_ctx, _query, _options, signal) => new Promise((resolve, reject) => {
+    signal.addEventListener('abort', () => { firstReason = signal.reason; controller.abort(new Error('secondary cancellation')); reject(signal.reason) }, { once: true })
+  }) })
+  await assert.rejects(router.search({ query: 'timeout wins' }, controller.signal), error => { assert.equal(error.code, 'WEB_PROVIDER_TIMEOUT'); assert.equal(error.cause, firstReason); assert.equal(error.cause.name, 'TimeoutError'); return true })
+}))
 
-test('trusted official route retains a cross-copy native WebError identity and machine code', async () => {
-  class NativeWebError extends Error {
-    constructor(message, code) { super(message); this.name = 'WebError'; this.code = code }
-  }
-  const foreign = new NativeWebError('Host-native credential guidance', 'WEB_PROVIDER_CREDENTIAL_MISSING')
-  assert.equal(foreign instanceof WebError, false, 'simulate a separate peer-module class identity')
-  const router = createSearchProvider(officialContext({ available: () => true, search: async () => { throw foreign } }), () => config({ searchProviders: [] }))
-  await assert.rejects(router.search({ query: 'official foreign error' }), error => {
-    assert.equal(error, foreign, 'both inner and outer mapping retain the original Host-native error')
-    assert.equal(error.code, 'WEB_PROVIDER_CREDENTIAL_MISSING')
-    assert.equal(error.message, 'Host-native credential guidance')
-    return true
-  })
-})
-
-test('the same foreign typed error from Codex or ZAI remains an untrusted sanitized backend error', async () => {
-  class NativeWebError extends Error {
-    constructor(message, code) { super(message); this.name = 'WebError'; this.code = code }
-  }
-  const secret = 'SYNTHETIC_FOREIGN_ERROR_SECRET'
-  const foreign = new NativeWebError(`Backend echoed ${secret}`, 'WEB_PROVIDER_CREDENTIAL_MISSING')
-  for (const provider of ['openai-codex', 'zai']) {
-    const router = createSearchProvider(officialContext(), () => config({ searchProviders: [provider] }), { codexSearch: async () => { throw foreign }, zaiSearch: async () => { throw foreign } })
-    await assert.rejects(router.search({ query: 'untrusted foreign error' }), error => {
-      assert.notEqual(error, foreign)
-      assert.ok(error instanceof WebError)
-      assert.equal(error.code, 'WEB_PROVIDER_ERROR')
-      assert.equal(error.message, 'Search provider failed')
-      assert.doesNotMatch(error.message, new RegExp(secret, 'u'))
-      assert.equal(error.cause, undefined)
-      return true
-    })
-  }
-})
-
-test('official cross-copy structural recognition rejects malformed or unbounded error codes', async () => {
-  class NativeWebError extends Error {
-    constructor(code) { super('Synthetic backend echo must not pass through'); this.name = 'WebError'; this.code = code }
-  }
-  for (const code of ['lowercase', 'WEB-CODE', 'W'.repeat(65), 42, undefined]) {
-    const foreign = new NativeWebError(code)
-    const router = createSearchProvider(officialContext({ available: () => true, search: async () => { throw foreign } }), () => config({ searchProviders: [] }))
-    await assert.rejects(router.search({ query: 'invalid foreign code' }), error => {
-      assert.notEqual(error, foreign)
-      assert.equal(error.code, 'WEB_PROVIDER_ERROR')
-      assert.equal(error.message, 'Search provider failed')
-      return true
-    })
-  }
-})
-
-test('synchronous cancellation during dispatch observes an already-rejected backend promise', () => {
+test('synchronous cancellation observes rejected backend promises under strict rejection handling', () => {
   const providersUrl = new URL('../lib/providers.js', import.meta.url).href
   const script = `
     import assert from 'node:assert/strict';
-    const { createSearchProvider, PROVIDERS } = await import(${JSON.stringify(providersUrl)});
-    const controller = new AbortController();
-    const router = createSearchProvider({}, () => ({ searchProviders: ['openai-codex', 'zai'], enabledProviders: PROVIDERS, timeoutMs: 60000 }), {
-      codexSearch: () => { controller.abort(new Error('synthetic synchronous cancellation')); return Promise.reject(new Error('synthetic rejected backend')); },
-      zaiSearch: () => Promise.reject(new Error('synthetic second rejected backend')),
+    const {createSearchProvider,PROVIDERS}=await import(${JSON.stringify(providersUrl)});
+    const controller=new AbortController();
+    const ctx={web:{searchProviders:new Map([['deepseek-official',{available:()=>true,search:async()=>({sources:[],truncated:false})}]])}};
+    const router=createSearchProvider(ctx,()=>({searchProviders:['openai-codex','zai'],enabledProviders:PROVIDERS,timeoutMs:60000}),{
+      codexSearch:()=>{controller.abort(new Error('synthetic cancellation'));return Promise.reject(new Error('synthetic rejection'));},
+      zaiSearch:()=>Promise.reject(new Error('synthetic second rejection')),
     });
-    await assert.rejects(router.search({ query: 'query' }, controller.signal), error => error.code === 'WEB_ABORTED');
-    await new Promise(resolve => setImmediate(resolve));
+    await assert.rejects(router.search({query:'query'},controller.signal),error=>error.code==='WEB_ABORTED');
+    await new Promise(resolve=>setImmediate(resolve));
   `
   const child = spawnSync(process.execPath, ['--unhandled-rejections=strict', '--input-type=module', '-e', script], { encoding: 'utf8', timeout: 5000, env: {} })
-  assert.equal(child.error, undefined)
-  assert.equal(child.signal, null)
-  assert.equal(child.status, 0, child.stderr)
+  assert.equal(child.error, undefined); assert.equal(child.signal, null); assert.equal(child.status, 0, child.stderr)
 })
 
-test('timeout retains first-source classification if its listener also aborts the caller', async () => withTimer(async () => {
-  const controller = new AbortController()
-  let firstReason
-  const router = createSearchProvider(officialContext(), () => config({ timeoutMs: 10 }), { codexSearch: (_ctx, _query, _options, signal) => new Promise((resolve, reject) => {
-    signal.addEventListener('abort', () => { firstReason = signal.reason; controller.abort(new Error('synthetic secondary caller cancellation')); reject(signal.reason) }, { once: true })
-  }) })
-  await assert.rejects(router.search({ query: 'timeout wins' }, controller.signal), error => { assert.equal(error.code, 'WEB_PROVIDER_TIMEOUT'); assert.equal(error.cause, firstReason); assert.equal(error.cause.name, 'TimeoutError'); return true })
-  assert.equal(controller.signal.aborted, true)
-}))
-
-test('shared timeout is fatal rather than returning partial success when the other backend stalls', async () => withTimer(async () => {
-  const router = createSearchProvider(officialContext(), () => config({ searchProviders: ['openai-codex', 'zai'], timeoutMs: 10 }), { codexSearch: async () => outcome('completed'), zaiSearch: pendingUntilAbort })
-  await assert.rejects(router.search({ query: 'fatal timeout' }), isCode('WEB_PROVIDER_TIMEOUT'))
-}))
-
-test('deployment timeout aborts a cooperative single adapter with WEB_PROVIDER_TIMEOUT', async () => withTimer(async () => {
-  const router = createSearchProvider(officialContext(), () => config({ timeoutMs: 10 }), { codexSearch: pendingUntilAbort })
-  await assert.rejects(router.search({ query: 'timeout' }), isCode('WEB_PROVIDER_TIMEOUT'))
-}))
+test('cross-copy official errors preserve approved codes but sanitize unknown codes and optional routes', async () => {
+  class NativeWebError extends Error { constructor(message, code) { super(message); this.name = 'WebError'; this.code = code } }
+  const missing = new NativeWebError('SYNTHETIC_NATIVE_ERROR_SECRET', 'WEB_PROVIDER_CREDENTIAL_MISSING')
+  const trusted = createSearchProvider(officialContext({ available: () => true, search: async () => { throw missing } }), () => config({ searchProviders: [] }))
+  await assert.rejects(trusted.search({ query: 'official error' }), error => { assert.equal(error.code, 'WEB_PROVIDER_CREDENTIAL_MISSING'); assert.notEqual(error, missing); assert.doesNotMatch(error.message, /SYNTHETIC_NATIVE_ERROR_SECRET/u); assert.equal(error.cause, undefined); return true })
+  for (const code of ['SYNTHETIC_UNKNOWN', 'lowercase', 'WEB-CODE', 'W'.repeat(65), 42]) {
+    const foreign = new NativeWebError('SYNTHETIC_NATIVE_ERROR_SECRET', code)
+    const router = createSearchProvider(officialContext({ available: () => true, search: async () => { throw foreign } }), () => config({ searchProviders: [] }))
+    await assert.rejects(router.search({ query: 'unknown native error' }), error => { assert.equal(error.code, 'WEB_PROVIDER_ERROR'); assert.doesNotMatch(error.message, /SYNTHETIC_NATIVE_ERROR_SECRET/u); return true })
+  }
+  for (const id of ['openai-codex', 'zai']) {
+    const router = createSearchProvider(officialContext(), () => config(), { codexSearch: async () => { throw missing }, zaiSearch: async () => { throw missing } }, id)
+    await assert.rejects(router.search({ query: 'foreign optional error' }), error => { assert.equal(error.code, 'WEB_PROVIDER_ERROR'); assert.notEqual(error, missing); assert.equal(error.cause, undefined); return true })
+  }
+})

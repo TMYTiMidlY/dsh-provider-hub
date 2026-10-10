@@ -1,4 +1,5 @@
-# One global search route. Keep native tool schemas, presets, sessions and web_fetch.
+# One global augmentation route: official search always runs; switches add enhancements.
+# Keep native tool schemas, presets, sessions and web_fetch.
 # Explicit deployment environment/profile overrides remain authoritative.
 - id: web
   config:
