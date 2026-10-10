@@ -37,7 +37,7 @@
 - 动态展示沿用原生 preparing/running → 最终 `tool/result`，完成结果自然更新并可展开。DSH `0.2.1-alpha.1` 没有该搜索契约的公开逐来源 stream writer；本版本**不模拟逐条增量来源、不追加假 tool/result、不承诺流式搜索来源**。
 - 在当前主 Host DSH `0.2.1-alpha.1` 上，PTC 嵌套调用没有根调用同款 presentation metadata，使用原生通用文本/value fallback 并保留短标签与安全内容，不能将此限制泛化到其他 Host。上游 `@deepseek-ai/dsh-tools@0.2.1-alpha.2` 已扩展 nested presentationMeta 并将其保存到 `tool/ptc-dispatch`；本插件遵循宿主原生契约保留合法 metadata，不强行删除，也不承诺所有版本的 PTC 子调用必有根调用同款 WebBlock。
 
-新结果的来源标签随原生 `tool/result.meta.sources` 和模型可见文本持久化，不依赖本插件客户端解释。卸载整个 bundle 后应仍由原生历史组件展示；实际卸载与冷加载需在隔离环境验收后再声明已验证。旧历史若没有来源事实，不追溯猜测标记或改写日志。
+新结果的来源标签随原生 `tool/result.meta.sources` 和模型可见文本持久化，不依赖本插件客户端解释。已在独立 Home、DSH `0.2.1-alpha.1` 中通过真实 AgentLoop 与 Codex/Z.AI 搜索生成标准、PTC、创造模式会话，再移除插件包和 bundle、关闭进程并冷启动：标准/创造模式的原生链接卡、PTC 的原生文本 fallback 均可读取，结果内容保持一致，读历史没有重新搜索。该环境没有官方凭据，官方每次都实际尝试并如实显示失败，没有伪标官方来源；这不代表主部署的鉴权状态。旧历史若没有来源事实，不追溯猜测标记或改写日志。
 
 ## 安装
 
