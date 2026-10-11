@@ -1,14 +1,14 @@
-# dsh-web-search
+# dsh-provider-hub
 
 [![CI](https://github.com/TMYTiMidlY/dsh-provider-hub/actions/workflows/ci.yml/badge.svg)](https://github.com/TMYTiMidlY/dsh-provider-hub/actions/workflows/ci.yml)
 
-一个独立的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 插件，**始终保留官方搜索，再为所有已有 `web_search` 附加 Codex / Z.AI 搜索增强**，并在 Web Models 页面提供 ChatGPT/Codex OAuth 登录入口。
+一个独立的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 插件，**始终保留官方搜索，再为所有已有 `web_search` 附加 Codex / Z.AI 搜索增强**，并在 Web Models 页面提供 ChatGPT/Codex OAuth 登录入口与 **Codex 账号额度查询 / 小时记录**。
 
-> `0.3.0` 保留官方工具、现有 preset、原生调用栏和 `web_fetch`，不新增 Agent 模式或专属结果渲染器。默认每条查询调用 **官方 + Codex**；Z.AI 可独立附加。两个开关只控制增强，不能关掉官方基线。只有 ChatGPT/Codex 有 OAuth 登录按钮，Z.AI 使用 DSH 官方 API Key 配置入口。
+> `0.4.1` 保留官方工具、现有 preset、原生调用栏和 `web_fetch`，不新增 Agent 模式或专属结果渲染器。默认每条查询调用 **官方 + Codex**；Z.AI 可独立附加。两个开关只控制增强，不能关掉官方基线。只有 ChatGPT/Codex 有 OAuth 登录按钮，Z.AI 使用 DSH 官方 API Key 配置入口。登录卡在已登录时展示账号额度（邮箱、计划、窗口用量、重置时间、积分），并在后台每小时记录一次历史。
 
 ## 官方基线与搜索增强
 
-打开 WebUI **插件 → 搜索提供方**。官方基线是非交互提示，不代表凭据已可用；两个增强开关共同暂存，由一次 **保存** 提交：
+打开 WebUI **插件 → 已安装 → dsh-provider-hub**，在详情页的 **搜索与额度** 区统一配置搜索增强及额度记录。原生 **官方 → 网页搜索** 保持原样，用于官方搜索自己的凭据与设置；本插件不冒充官方项目，也不替换它的卡片。官方基线提示不代表凭据已可用；两个增强开关与额度记录设置共同暂存，由一次 **保存** 提交：
 
 | Codex 增强 | Z.AI 增强 | 后续每条查询的默认调用 |
 |---|---|---|
@@ -41,14 +41,16 @@
 
 ## 安装
 
-先在独立 `DSH_HOME` 验收，再安装到目标 Web profile。打包 `0.3.0` 使用新的目录，不覆盖之前的产物：
+先在独立 `DSH_HOME` 验收，再安装到目标 Web profile。打包 `0.4.1` 使用新的目录，不覆盖之前的产物：
 
 ```sh
-PACK_DIR="$(mktemp -d /tmp/dsh-web-search-pack.XXXXXX)"
+PACK_DIR="$(mktemp -d /tmp/dsh-provider-hub-pack.XXXXXX)"
 npm pack --pack-destination "${PACK_DIR:?}"
 # 在已安装 dsh 的主机上：
-npm_config_auto_install_peers=false dsh plugin --profile web add "${PACK_DIR:?}/dsh-web-search-0.3.0.tgz"
+npm_config_auto_install_peers=false dsh plugin --profile web add "${PACK_DIR:?}/dsh-provider-hub-0.4.1.tgz"
 ```
+
+从 `dsh-web-search` 0.3.x 升级：先 `dsh plugin --profile web remove dsh-web-search`，再按上面安装新包，并把 profile patch 中 `- id: dsh-web-search` 条目改名为 `dsh-provider-hub`（配置字段名不变，废弃的 `tool` 兼容字段可删除）。entry id 变更意味着旧配置不会自动迁移；额度三项缺省时使用默认值。
 
 安装命令仅对这一次 `dsh plugin add` 设置 `npm_config_auto_install_peers=false`：DSH peer 包由正在运行的 Host 提供，避免在 profile 中自动安装第二份 DSH 类库而造成跨副本类型身份不一致。不修改全局 npm/pnpm 配置；CI 或独立源码开发中的普通 `npm install` 仍正常安装所需 peers。
 
@@ -68,7 +70,7 @@ npm_config_auto_install_peers=false dsh plugin --profile web add "${PACK_DIR:?}/
 
 ## 全局配置与持久化
 
-- 保存通过 DSH 原生 `configForms` / settings 服务写入当前 profile patch，namespace 为 Host entry id `dsh-web-search`。
+- 保存通过 DSH 原生 `configForms` / settings 服务写入当前 profile patch，namespace 为 Host entry id `dsh-provider-hub`。
 - 保存成功后，所有现有会话的**后续搜索**读取新配置，不需要重建 Agent；执行中的一次搜索保持启动时的选择与超时快照。
 - 原生修订号校验防止覆盖其他页面的新配置；被拒绝的保存会保留草稿供修改或重试。
 - 只读或远程 memory 连接遵从 DSH 的写入权限，不另造 RPC 绕过限制；可以在本机 WebUI 或部署配置中修改。
@@ -76,7 +78,7 @@ npm_config_auto_install_peers=false dsh plugin --profile web add "${PACK_DIR:?}/
 也可在当前 profile patch 中覆盖 Host 配置：
 
 ```yaml
-- id: dsh-web-search
+- id: dsh-provider-hub
   config:
     searchProviders:
       - openai-codex
@@ -87,11 +89,16 @@ npm_config_auto_install_peers=false dsh plugin --profile web add "${PACK_DIR:?}/
       - zai
       - google-zread
     timeoutMs: 60000
+    quotaRecord: true
+    quotaIntervalMinutes: 60
+    quotaHistoryDays: 180
 ```
 
 `searchProviders` 只描述附加增强，接受 `openai-codex`、`zai`：单元素为官方加一路增强，双元素为官方加两路增强，显式 `[]` 仅保留官方。省略时继承默认 `['openai-codex']`，实际调用官方 + Codex。它取代旧单选字段 `defaultProvider`；先前的孤立验收配置应移除旧字段并使用新数组。
 
 `searchProviders`、`timeoutMs` 和遗留 reader 的 `zreadEndpoint` 是实时 Config 字段。`enabledProviders` 是普通部署 allowlist，不是用户的增强开关，改变它遵循 Loader 重载生命周期。应保留 `deepseek-official` 基线；运维禁用或缺凭据会公开相应失败，不会伪装成功或调用未选中的增强。覆盖整项 `config` 时应保留仍需使用的字段。
+
+`quotaRecord`、`quotaIntervalMinutes`（15–1440，默认 60）和 `quotaHistoryDays`（7–3650，默认 180）同样使用原生实时 Config 字段，经同一个 configForms 表单保存，控制 Codex 额度记录：DSH 运行期间每间隔分钟在后台只读查询一次 `wham/usage` 并落盘；历史点保存在 `$DSH_HOME/dsh-provider-hub/quota-history.jsonl`（0600，按账号标记，超期整理删除）。
 
 ### 运维覆盖
 
@@ -132,12 +139,25 @@ Models 页面中只有 `llm-pi-ai` 的 ChatGPT/Codex provider 行显示本插件
 
 远程 WebUI 的 OAuth callback 不能假定远程主机拥有浏览器的 `localhost`，因此应使用 pi-ai flow 自带的手工 URL/code fallback。搜索读取现存且未过期的 Codex grant，本身不会主动刷新过期 grant。取消按独立 attempt 信号管理，不按账号 key 全局取消；导航离开后，重新打开授权区可恢复仍在运行的 attempt。
 
+### 账号额度展示与记录
+
+登录成功后，授权卡下方出现 **账号额度** 区，展示邮箱、计划、各窗口已用比例进度条、重置倒计时、积分余额与可重置次数，并提供 24 小时 / 7 天 / 30 天用量曲线。查询触发时机：
+
+| 触发 | 行为 |
+|---|---|
+| 后台定时 | DSH 运行期间每 `quotaIntervalMinutes`（默认 60）查询一次并记录历史；页面关闭不影响 |
+| 打开额度区 | 缓存 5 分钟内直接复用，超过才发起一次真实查询 |
+| 点击刷新 | 立即查询；同一账号 60 秒内重复点击会节流返回缓存 |
+| 换号后 | 检测到 account id 变化时绕过节流立即查询 |
+
+额度查询走 `GET https://chatgpt.com/backend-api/wham/usage`（与 Codex CLI `/status` 同源），**纯只读**：不登录、不刷新令牌、不消耗重置次数，响应字段按已观察的别名族解析，窗口按时长分类而不是字段位置。令牌被拒（401/403）或距过期不足 5 分钟时显示恢复提示——在 DSH 发送一次对话让官方链路自动刷新后，下一个查询即自愈；查询失败时保留并标注上次成功数据。凭据、邮箱与历史仅保存在本机 DSH Home，不随 remote bridge 返回 token。
+
 ## 停用、卸载与旧模式迁移
 
 - **卸载或停用整个 bundle**并应用新的组合配置后，移除本包对原生 Web 的覆盖，默认回到官方 DeepSeek；用户另写的 profile/home/CLI 覆盖仍需检查。
 - **只停用 Host 插件，但保留 `web.searchProvider: dsh-provider-hub`**，会留下明确的 `WEB_PROVIDER_CONFIGURED_MISSING`，不会自动恢复。应停用整个 bundle，或同时改回 `deepseek-official`。
 - 提供方注册、设置订阅、页面和 scoped 样式随 Cordis fiber 回收；设置卡不销毁共享 `configForms` scope。
-- 新安装不发布、插入或修改专用 Provider Hub preset。`dsh-web-search/tool` 只保留模块导入兼容桥，遵循官方 `queries[]` 契约；它不会注册或恢复 `provider-hub` preset id，**不能保证已移除该 id 的旧会话自动冷恢复（cold resume）**。旧的 `query` / `provider` 调用仍需迁移。
+- 新安装不发布、插入或修改专用 Provider Hub preset。`dsh-provider-hub/tool` 只保留模块导入兼容桥，遵循官方 `queries[]` 契约；它不会注册或恢复 `provider-hub` preset id，**不能保证已移除该 id 的旧会话自动冷恢复（cold resume）**。旧的 `query` / `provider` 调用仍需迁移。
 - 升级前检查旧 `provider-hub` 会话和默认预设选择。仍允许原生预设选择的会话及默认设置，应在移除旧 id 前改回标准模式；**已有内容的会话可能被原生选择器锁定，不能假定可以直接切换模式**。此时应先备份，再针对会话 projection identity 制定并验证迁移，或暂时保留可解析的旧预设兼容配置；本插件不自动执行这些迁移。移除该 id 后，`agentPresets.resolve('provider-hub')` 会因预设不存在而失败，仅保留工具模块不足以恢复。确认没有此 id 的会话且默认选择已是原生模式时，无需迁移会话。
 
 ## 本地开发

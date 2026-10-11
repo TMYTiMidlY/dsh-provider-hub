@@ -7,9 +7,12 @@
     fetchProvider: http
 
 - insert:
-    - id: dsh-web-search
-      name: dsh-web-search
+    - id: dsh-provider-hub
+      name: dsh-provider-hub
       config:
         searchProviders: [openai-codex]
         enabledProviders: [deepseek-official, openai-codex, zai, google-zread]
         timeoutMs: 60000
+        quotaRecord: true
+        quotaIntervalMinutes: 60
+        quotaHistoryDays: 180
