@@ -4,7 +4,7 @@
 
 一个独立的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 插件，**始终保留官方搜索，再为所有已有 `web_search` 附加 Codex / Z.AI 搜索增强**，并在 Web Models 页面提供 ChatGPT/Codex OAuth 登录入口与 **Codex 账号额度查询 / 小时记录**。
 
-> `0.4.1` 保留官方工具、现有 preset、原生调用栏和 `web_fetch`，不新增 Agent 模式或专属结果渲染器。默认每条查询调用 **官方 + Codex**；Z.AI 可独立附加。两个开关只控制增强，不能关掉官方基线。只有 ChatGPT/Codex 有 OAuth 登录按钮，Z.AI 使用 DSH 官方 API Key 配置入口。登录卡在已登录时展示账号额度（邮箱、计划、窗口用量、重置时间、积分），并在后台每小时记录一次历史。
+> `0.4.2` 保留官方工具、现有 preset、原生调用栏和 `web_fetch`，不新增 Agent 模式或专属结果渲染器。默认每条查询调用 **官方 + Codex**；Z.AI 可独立附加。两个开关只控制增强，不能关掉官方基线。只有 ChatGPT/Codex 有 OAuth 登录按钮，Z.AI 使用 DSH 官方 API Key 配置入口。登录卡在已登录时展示账号额度（邮箱、计划、窗口用量、重置时间、积分），并在后台每小时记录一次历史。
 
 ## 官方基线与搜索增强
 
@@ -41,13 +41,13 @@
 
 ## 安装
 
-先在独立 `DSH_HOME` 验收，再安装到目标 Web profile。打包 `0.4.1` 使用新的目录，不覆盖之前的产物：
+先在独立 `DSH_HOME` 验收，再安装到目标 Web profile。打包 `0.4.2` 使用新的目录，不覆盖之前的产物：
 
 ```sh
 PACK_DIR="$(mktemp -d /tmp/dsh-provider-hub-pack.XXXXXX)"
 npm pack --pack-destination "${PACK_DIR:?}"
 # 在已安装 dsh 的主机上：
-npm_config_auto_install_peers=false dsh plugin --profile web add "${PACK_DIR:?}/dsh-provider-hub-0.4.1.tgz"
+npm_config_auto_install_peers=false dsh plugin --profile web add "${PACK_DIR:?}/dsh-provider-hub-0.4.2.tgz"
 ```
 
 从 `dsh-web-search` 0.3.x 升级：先 `dsh plugin --profile web remove dsh-web-search`，再按上面安装新包，并把 profile patch 中 `- id: dsh-web-search` 条目改名为 `dsh-provider-hub`（配置字段名不变，废弃的 `tool` 兼容字段可删除）。entry id 变更意味着旧配置不会自动迁移；额度三项缺省时使用默认值。
@@ -141,16 +141,17 @@ Models 页面中只有 `llm-pi-ai` 的 ChatGPT/Codex provider 行显示本插件
 
 ### 账号额度展示与记录
 
-登录成功后，授权卡下方出现 **账号额度** 区，展示邮箱、计划、各窗口已用比例进度条、重置倒计时、积分余额与可重置次数，并提供 24 小时 / 7 天 / 30 天用量曲线。查询触发时机：
+登录成功后，授权卡下方出现 **账号额度** 区，展示邮箱、计划、各窗口已用比例进度条、重置倒计时、积分余额与可重置次数；每张可重置额度单独列出标题与**到期日期**（含倒计时，来源 `GET /wham/rate-limit-reset-credits`，只读）。另提供 24 小时 / 7 天 / 30 天用量曲线，面板打开期间每 60 秒自动重读历史，无需手动刷新。查询触发时机：
 
 | 触发 | 行为 |
 |---|---|
 | 后台定时 | DSH 运行期间每 `quotaIntervalMinutes`（默认 60）查询一次并记录历史；页面关闭不影响 |
 | 打开额度区 | 缓存 5 分钟内直接复用，超过才发起一次真实查询 |
+| 面板打开期间 | 每 60 秒自动重读用量历史（本地读盘，不发上游请求），曲线随记录点持续更新 |
 | 点击刷新 | 立即查询；同一账号 60 秒内重复点击会节流返回缓存 |
 | 换号后 | 检测到 account id 变化时绕过节流立即查询 |
 
-额度查询走 `GET https://chatgpt.com/backend-api/wham/usage`（与 Codex CLI `/status` 同源），**纯只读**：不登录、不刷新令牌、不消耗重置次数，响应字段按已观察的别名族解析，窗口按时长分类而不是字段位置。令牌被拒（401/403）或距过期不足 5 分钟时显示恢复提示——在 DSH 发送一次对话让官方链路自动刷新后，下一个查询即自愈；查询失败时保留并标注上次成功数据。凭据、邮箱与历史仅保存在本机 DSH Home，不随 remote bridge 返回 token。
+额度查询走 `GET https://chatgpt.com/backend-api/wham/usage`（与 Codex CLI `/status` 同源），重置额度明细走 `GET /wham/rate-limit-reset-credits`（仅在有可用额度时附加读取，失败不影响主视图），**纯只读**：不登录、不刷新令牌、不消耗重置次数，响应字段按已观察的别名族解析，窗口按时长分类而不是字段位置。令牌被拒（401/403）或距过期不足 5 分钟时显示恢复提示——在 DSH 发送一次对话让官方链路自动刷新后，下一个查询即自愈；查询失败时保留并标注上次成功数据。凭据、邮箱与历史仅保存在本机 DSH Home，不随 remote bridge 返回 token。
 
 ## 停用、卸载与旧模式迁移
 

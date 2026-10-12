@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { QuotaFormatError, QuotaHistory, QuotaService, identityFromToken, parseQuotaBody, quotaHistoryPath } from '../lib/quota.js'
+import { QuotaFormatError, QuotaHistory, QuotaService, identityFromToken, parseQuotaBody, parseResetCreditsBody, quotaHistoryPath } from '../lib/quota.js'
 
 const b64url = value => Buffer.from(JSON.stringify(value)).toString('base64url')
 const syntheticToken = (claims = {}) => `synthetic-header.${b64url(claims)}.synthetic-signature`
@@ -36,6 +36,28 @@ function service({ record = grant(), readRecord, fetchImpl, config = {}, history
 }
 
 const jsonResponse = (value, status = 200) => Response.json(value, { status })
+
+const resetCreditsFixture = () => ({
+  credits: [
+    { id: 'RateLimitResetCredit_a', reset_type: 'codex_rate_limits', status: 'available', granted_at: '2026-09-22T20:58:10.363939Z', expires_at: '2026-10-22T20:58:10.363939Z', title: 'Full reset' },
+    { id: 'RateLimitResetCredit_b', reset_type: 'codex_rate_limits', status: 'available', granted_at: '2026-09-29T19:10:22.010515Z', expires_at: '2026-10-29T19:10:22.010515Z', title: 'Full reset' },
+    { id: 'RateLimitResetCredit_c', reset_type: 'codex_rate_limits', status: 'redeemed', granted_at: '2026-10-01T00:00:00Z', expires_at: '2026-11-01T00:00:00Z', title: 'Full reset' },
+  ],
+  available_count: 3,
+  total_earned_count: 0,
+})
+
+// Count only the primary usage reads; the reset-credits detail read is a
+// second, best-effort call inside the same fetch round.
+const countingFetch = (fixture = liveFixture, credits = resetCreditsFixture) => {
+  const state = { calls: 0, creditCalls: 0 }
+  state.fetch = async url => {
+    if (String(url).includes('rate-limit-reset-credits')) { state.creditCalls++; return jsonResponse(credits()) }
+    state.calls++
+    return jsonResponse(fixture())
+  }
+  return state
+}
 
 test('parser normalizes the current single-weekly-window shape', () => {
   const parsed = parseQuotaBody(liveFixture())
@@ -119,8 +141,8 @@ test('QuotaHistory compaction drops old points but keeps the newest per account'
 })
 
 test('snapshot serves a normalized view without leaking the access token', async () => {
-  let calls = 0
-  const svc = service({ fetchImpl: async () => { calls++; return jsonResponse(liveFixture()) } })
+  const fetch = countingFetch()
+  const svc = service({ fetchImpl: fetch.fetch })
   const result = await svc.snapshot({})
   assert.equal(result.status, 'ok')
   assert.equal(result.snapshot.email, 'quota@example.test')
@@ -130,36 +152,74 @@ test('snapshot serves a normalized view without leaking the access token', async
   assert.doesNotMatch(JSON.stringify(result), /synthetic-header|synthetic-signature/u)
   const cached = await svc.snapshot({})
   assert.equal(cached.cached, true)
-  assert.equal(calls, 1)
+  assert.equal(fetch.calls, 1)
+})
+
+test('per-credit expiry details enrich the reset credits view', async () => {
+  const fetch = countingFetch()
+  const svc = service({ fetchImpl: fetch.fetch })
+  const result = await svc.snapshot({})
+  assert.equal(result.status, 'ok')
+  assert.equal(result.snapshot.resetCredits.available, 3)
+  assert.equal(result.snapshot.resetCredits.credits.length, 3)
+  assert.deepEqual(result.snapshot.resetCredits.credits[0], { title: 'Full reset', grantedAt: Math.floor(Date.parse('2026-09-22T20:58:10.363939Z') / 1000), expiresAt: Math.floor(Date.parse('2026-10-22T20:58:10.363939Z') / 1000), status: 'available' })
+  assert.equal(fetch.creditCalls, 1)
+})
+
+test('reset credits detail failure falls back to the aggregate count', async () => {
+  const fetch = countingFetch(liveFixture, () => { throw new Error('synthetic credits failure') })
+  const svc = service({ fetchImpl: fetch.fetch })
+  const result = await svc.snapshot({})
+  assert.equal(result.status, 'ok')
+  assert.deepEqual(result.snapshot.resetCredits, { available: 3 })
+})
+
+test('reset credits detail read is skipped when no credits are available', async () => {
+  const fetch = countingFetch(() => ({ ...liveFixture(), rate_limit_reset_credits: { available_count: 0, applicable_available_count: 0 } }))
+  const svc = service({ fetchImpl: fetch.fetch })
+  const result = await svc.snapshot({})
+  assert.equal(result.status, 'ok')
+  assert.equal(result.snapshot.resetCredits, undefined)
+  assert.equal(fetch.creditCalls, 0)
+})
+
+test('parseResetCreditsBody reads expiry details and skips malformed entries', () => {
+  const parsed = parseResetCreditsBody(resetCreditsFixture())
+  assert.equal(parsed.available, 3)
+  assert.equal(parsed.credits.length, 3)
+  assert.throws(() => parseResetCreditsBody({ credits: 'nope' }), QuotaFormatError)
+  const sparse = parseResetCreditsBody({ credits: [{ title: 'No expiry' }, { expires_at: '2026-11-06T23:36:20Z', title: 'Full reset' }] })
+  assert.equal(sparse.credits.length, 1)
+  assert.equal(sparse.credits[0].title, 'Full reset')
 })
 
 test('manual refresh is clamped to one upstream call per minute per account', async () => {
-  let calls = 0
+  const fetch = countingFetch()
   let now = 1_000_000_000_000
-  const svc = service({ fetchImpl: async () => { calls++; return jsonResponse(liveFixture()) }, now: () => now })
+  const svc = service({ fetchImpl: fetch.fetch, now: () => now })
   await svc.snapshot({ maxAgeMs: 0 })
   now += 10_000
   const throttled = await svc.snapshot({ maxAgeMs: 0 })
   assert.equal(throttled.cached, true)
   assert.equal(throttled.throttled, true)
-  assert.equal(calls, 1)
+  assert.equal(fetch.calls, 1)
   now += 120_000
   await svc.snapshot({ maxAgeMs: 0 })
-  assert.equal(calls, 2)
+  assert.equal(fetch.calls, 2)
 })
 
 test('switching accounts bypasses the spacing clamp', async () => {
-  let calls = 0
+  const fetch = countingFetch()
   let now = 1_000_000_000_000
   let accountId = 'acct-1'
-  const svc = service({ readRecord: async () => grant({ accountId }), fetchImpl: async () => { calls++; return jsonResponse(liveFixture()) }, now: () => now })
+  const svc = service({ readRecord: async () => grant({ accountId }), fetchImpl: fetch.fetch, now: () => now })
   await svc.snapshot({ maxAgeMs: 0 })
   accountId = 'acct-2'
   now += 10_000
   const switched = await svc.snapshot({ maxAgeMs: 0 })
   assert.equal(switched.status, 'ok')
   assert.equal(switched.snapshot.account, 'acct-2')
-  assert.equal(calls, 2)
+  assert.equal(fetch.calls, 2)
 })
 
 test('signed-out and expired credentials surface as distinct states', async () => {
@@ -168,9 +228,13 @@ test('signed-out and expired credentials surface as distinct states', async () =
 })
 
 test('a rejected upstream call keeps the last good snapshot and names the recovery path', async () => {
-  let calls = 0
+  let usageCalls = 0
   let now = 1_000_000_000_000
-  const svc = service({ fetchImpl: async () => { calls++; return calls === 1 ? jsonResponse(liveFixture()) : new Response('{}', { status: 401 }) }, now: () => now })
+  const svc = service({ fetchImpl: async url => {
+    if (String(url).includes('rate-limit-reset-credits')) return jsonResponse(resetCreditsFixture())
+    usageCalls++
+    return usageCalls === 1 ? jsonResponse(liveFixture()) : new Response('{}', { status: 401 })
+  }, now: () => now })
   await svc.snapshot({ maxAgeMs: 0 })
   now += 120_000
   const rejected = await svc.snapshot({ maxAgeMs: 0 })
