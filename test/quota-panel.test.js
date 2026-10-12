@@ -112,6 +112,21 @@ test('QuotaPanel renders the sparkline once history points arrive', async () => 
   const spark = nodes.find(node => node.props?.['data-quota-spark'])
   assert.ok(spark, 'sparkline renders once points exist')
   assert.equal(spark.props['data-quota-spark'], 'weekly')
+  const polyline = nodes.find(node => typeof node.props?.points === 'string' && node.props.fill === 'none')
+  assert.ok(polyline, 'trend polyline renders')
+  const ys = polyline.props.points.split(' ').map(pair => Number(pair.split(',')[1]))
+  assert.ok(Math.max(...ys) - Math.min(...ys) >= 10, 'trend spans the vertical range instead of a near-flat line')
+  const caps = nodes.filter(node => node.props?.['data-quota-spark-cap'])
+  assert.equal(caps.length, 2, 'endpoint value labels render')
+  assert.equal(caps[0].props['data-quota-spark-cap'], 'start')
+  assert.equal(caps[0].props.children, '16%')
+  assert.equal(caps[1].props['data-quota-spark-cap'], 'end')
+  assert.equal(caps[1].props.children, '28%')
+  const axis = nodes.find(node => node.props?.['data-quota-spark-axis'])
+  assert.ok(axis, 'time axis renders under the sparkline')
+  const ticks = nodes.filter(node => node.props?.['data-quota-spark-tick'])
+  assert.deepEqual(ticks.map(tick => tick.props['data-quota-spark-tick']), ['start', 'mid', 'end'])
+  assert.ok(ticks.every(tick => /^\d{2}-\d{2} \d{2}:\d{2}$/.test(tick.props.children)), 'sub-two-day span shows hour-precision ticks')
   const bars = nodes.filter(node => node.props?.['data-quota-window'])
   assert.equal(bars.length, 1)
   assert.equal(bars[0].props['data-quota-window'], 'weekly')
@@ -144,4 +159,26 @@ test('QuotaPanel falls back to the placeholder and keeps data on history failure
   assert.ok(nodes.find(node => node.props?.['data-quota-section']), 'panel still renders')
   assert.ok(nodes.some(node => (typeof node.props?.children === 'string' && node.props.children.includes('暂无历史记录'))), 'placeholder shows when history fails')
   assert.ok(nodes.find(node => node.props?.['data-quota-window']), 'snapshot data survives a history failure')
+})
+
+test('QuotaPanel keeps the sparkline centred and labelled when usage is flat', async () => {
+  const quota = {
+    snapshot: async () => ({ ok: true, value: { status: 'ok', snapshot: { account: 'acct-1', windows: [{ kind: 'weekly', usedPercent: 40 }] }, fetchedAt: Math.floor(Date.now() / 1000) } }),
+    history: async () => ({ ok: true, value: { status: 'ok', points: Array.from({ length: 4 }, (_, index) => ({ ts: 1791721950 + index * 259200, used: { weekly: 40 } })) } }),
+  }
+  const { draw } = await mountPanel(quota)
+  draw()
+  for (let i = 0; i < 8; i++) { await new Promise(resolve => setImmediate(resolve)); draw() }
+  const nodes = flatten(draw())
+  const polyline = nodes.find(node => typeof node.props?.points === 'string' && node.props.fill === 'none')
+  assert.ok(polyline, 'flat usage still renders a line')
+  const ys = polyline.props.points.split(' ').map(pair => Number(pair.split(',')[1]))
+  assert.ok(ys.every(y => Number.isFinite(y)), 'flat values map to finite coordinates')
+  assert.ok(ys.every(y => y === ys[0]), 'flat values render as one horizontal line')
+  assert.ok(Math.abs(ys[0] - 12) < 0.5, 'flat line sits at the vertical centre')
+  const caps = nodes.filter(node => node.props?.['data-quota-spark-cap'])
+  assert.equal(caps.map(cap => cap.props.children).join('→'), '40%→40%')
+  const ticks = nodes.filter(node => node.props?.['data-quota-spark-tick'])
+  assert.equal(ticks.length, 3, 'flat series still carries the time axis')
+  assert.ok(ticks.every(tick => /^\d{2}-\d{2}$/.test(tick.props.children)), 'multi-day span shows day-precision ticks')
 })

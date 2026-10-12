@@ -4,7 +4,7 @@
 
 一个独立的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 插件，**始终保留官方搜索，再为所有已有 `web_search` 附加 Codex / Z.AI 搜索增强**，并在 Web Models 页面提供 ChatGPT/Codex OAuth 登录入口与 **Codex 账号额度查询 / 小时记录**。
 
-> `0.4.2` 保留官方工具、现有 preset、原生调用栏和 `web_fetch`，不新增 Agent 模式或专属结果渲染器。默认每条查询调用 **官方 + Codex**；Z.AI 可独立附加。两个开关只控制增强，不能关掉官方基线。只有 ChatGPT/Codex 有 OAuth 登录按钮，Z.AI 使用 DSH 官方 API Key 配置入口。登录卡在已登录时展示账号额度（邮箱、计划、窗口用量、重置时间、积分），并在后台每小时记录一次历史。
+> `0.4.4` 保留官方工具、现有 preset、原生调用栏和 `web_fetch`，不新增 Agent 模式或专属结果渲染器。默认每条查询调用 **官方 + Codex**；Z.AI 可独立附加。两个开关只控制增强，不能关掉官方基线。只有 ChatGPT/Codex 有 OAuth 登录按钮，Z.AI 使用 DSH 官方 API Key 配置入口。登录卡在已登录时展示账号额度（邮箱、计划、窗口用量、重置时间、积分），并在后台每小时记录一次历史。
 
 ## 官方基线与搜索增强
 
@@ -41,13 +41,13 @@
 
 ## 安装
 
-先在独立 `DSH_HOME` 验收，再安装到目标 Web profile。打包 `0.4.2` 使用新的目录，不覆盖之前的产物：
+先在独立 `DSH_HOME` 验收，再安装到目标 Web profile。打包 `0.4.4` 使用新的目录，不覆盖之前的产物：
 
 ```sh
 PACK_DIR="$(mktemp -d /tmp/dsh-provider-hub-pack.XXXXXX)"
 npm pack --pack-destination "${PACK_DIR:?}"
 # 在已安装 dsh 的主机上：
-npm_config_auto_install_peers=false dsh plugin --profile web add "${PACK_DIR:?}/dsh-provider-hub-0.4.2.tgz"
+npm_config_auto_install_peers=false dsh plugin --profile web add "${PACK_DIR:?}/dsh-provider-hub-0.4.4.tgz"
 ```
 
 从 `dsh-web-search` 0.3.x 升级：先 `dsh plugin --profile web remove dsh-web-search`，再按上面安装新包，并把 profile patch 中 `- id: dsh-web-search` 条目改名为 `dsh-provider-hub`（配置字段名不变，废弃的 `tool` 兼容字段可删除）。entry id 变更意味着旧配置不会自动迁移；额度三项缺省时使用默认值。
@@ -141,7 +141,7 @@ Models 页面中只有 `llm-pi-ai` 的 ChatGPT/Codex provider 行显示本插件
 
 ### 账号额度展示与记录
 
-登录成功后，授权卡下方出现 **账号额度** 区，展示邮箱、计划、各窗口已用比例进度条、重置倒计时、积分余额与可重置次数；每张可重置额度单独列出标题与**到期日期**（含倒计时，来源 `GET /wham/rate-limit-reset-credits`，只读）。另提供 24 小时 / 7 天 / 30 天用量曲线，面板打开期间每 60 秒自动重读历史，无需手动刷新。查询触发时机：
+登录成功后，授权卡下方出现 **账号额度** 区，展示邮箱、计划、各窗口已用比例进度条、重置倒计时、积分余额与可重置次数；每张可重置额度单独列出标题与**到期日期**（含倒计时，来源 `GET /wham/rate-limit-reset-credits`，只读）。另提供 24 小时 / 7 天 / 30 天用量曲线（纵轴按数据范围自动缩放并留边距、两端标注首尾数值，横轴带时间刻度（短窗口显示到小时、跨多天显示到日期），避免小幅波动被压成一条直线），面板打开期间每 60 秒自动重读历史，无需手动刷新。查询触发时机：
 
 | 触发 | 行为 |
 |---|---|
