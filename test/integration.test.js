@@ -56,33 +56,39 @@ test('client stages independent OpenAI/ZAI switches and only Codex OAuth without
   let formDisposed = false
   let watchDisposed = false
   const effects = []
-  const state = { writable: true, saving: false, dirty: false, searchProviders: { text: '["openai-codex"]', overridden: false, invalid: false }, quotaRecord: { text: 'true', overridden: false, invalid: false }, quotaIntervalMinutes: { text: '60', overridden: false, invalid: false }, quotaHistoryDays: { text: '180', overridden: false, invalid: false } }
+  const state = { writable: true, saving: false, dirty: false, searchProviders: { text: '["openai-codex"]', overridden: false, invalid: false }, searchMaxResults: { text: '200', overridden: false, invalid: false }, quotaRecord: { text: 'true', overridden: false, invalid: false }, quotaIntervalMinutes: { text: '60', overridden: false, invalid: false }, quotaHistoryDays: { text: '180', overridden: false, invalid: false } }
   const scope = {
-    getSnapshot: () => ({ state: 'served', fields: { searchProviders: { value: ['openai-codex'] }, quotaRecord: { value: true }, quotaIntervalMinutes: { value: 60 }, quotaHistoryDays: { value: 180 } } }),
+    getSnapshot: () => ({ state: 'served', fields: { searchProviders: { value: ['openai-codex'] }, searchMaxResults: { value: 200 }, quotaRecord: { value: true }, quotaIntervalMinutes: { value: 60 }, quotaHistoryDays: { value: 180 } } }),
     subscribe: () => () => {},
-    mutate: async callback => { saved++; savedValue = callback({ searchProviders: ['openai-codex'], quotaRecord: true, quotaIntervalMinutes: 60, quotaHistoryDays: 180 }); return savedValue },
+    mutate: async callback => { saved++; savedValue = callback({ searchProviders: ['openai-codex'], searchMaxResults: 200, quotaRecord: true, quotaIntervalMinutes: 60, quotaHistoryDays: 180 }); return savedValue },
     dispose: () => { throw new Error('shared configForms scope must not be disposed by client') },
   }
   class SettingsFormModel {
     constructor(received, fields) {
       assert.equal(received, scope)
-      assert.equal(fields.length, 4)
+      assert.equal(fields.length, 5)
       assert.equal(fields[0].field, 'searchProviders')
       assert.equal(fields[0].format(['openai-codex', 'zai']), '["openai-codex","zai"]')
       assert.equal(JSON.stringify(fields[0].parse('[]').value), '[]')
       assert.equal(fields[0].parse('["deepseek-official"]'), undefined)
       assert.equal(fields[0].parse('["google-zread"]'), undefined)
       assert.equal(fields[0].parse('"zai"'), undefined)
-      assert.equal(JSON.stringify(fields.slice(1).map(field => field.field)), JSON.stringify(['quotaRecord', 'quotaIntervalMinutes', 'quotaHistoryDays']))
-      assert.equal(fields[1].format(false), 'false')
-      assert.equal(fields[1].format(undefined), 'true')
-      assert.equal(JSON.stringify(fields[1].parse('false')), JSON.stringify({ kind: 'set', value: false }))
-      assert.equal(fields[1].parse('yes'), undefined)
-      assert.equal(fields[2].format(45), '45')
-      assert.equal(fields[2].format('nonsense'), '60')
-      assert.equal(JSON.stringify(fields[2].parse('45')), JSON.stringify({ kind: 'set', value: 45 }))
-      assert.equal(fields[2].parse('5'), undefined, 'interval below schema minimum is staged as invalid')
-      assert.equal(fields[3].parse('999999'), undefined)
+      assert.equal(JSON.stringify(fields.slice(1).map(field => field.field)), JSON.stringify(['searchMaxResults', 'quotaRecord', 'quotaIntervalMinutes', 'quotaHistoryDays']))
+      assert.equal(fields[1].format(200), '200')
+      assert.equal(fields[1].format('nonsense'), '200')
+      assert.equal(JSON.stringify(fields[1].parse('45')), JSON.stringify({ kind: 'set', value: 45 }))
+      assert.equal(JSON.stringify(fields[1].parse('')), JSON.stringify({ kind: 'clear' }), 'an empty draft clears the override back to the composition value')
+      assert.equal(fields[1].parse('0'), undefined, 'source cap below schema minimum is staged as invalid')
+      assert.equal(fields[1].parse('1001'), undefined)
+      assert.equal(fields[2].format(false), 'false')
+      assert.equal(fields[2].format(undefined), 'true')
+      assert.equal(JSON.stringify(fields[2].parse('false')), JSON.stringify({ kind: 'set', value: false }))
+      assert.equal(fields[2].parse('yes'), undefined)
+      assert.equal(fields[3].format(45), '45')
+      assert.equal(fields[3].format('nonsense'), '60')
+      assert.equal(JSON.stringify(fields[3].parse('45')), JSON.stringify({ kind: 'set', value: 45 }))
+      assert.equal(fields[3].parse('5'), undefined, 'interval below schema minimum is staged as invalid')
+      assert.equal(fields[4].parse('999999'), undefined)
       this.fields = fields
     }
     bind(project) { return { getSnapshot: project, subscribe: () => () => {} } }
@@ -91,12 +97,14 @@ test('client stages independent OpenAI/ZAI switches and only Codex OAuth without
     actions() { return {
       edit: (name, value) => { state[name] = { ...state[name], text: value }; state.dirty = true },
       resetField: name => { state[name] = { ...state[name], text: '["openai-codex"]' } },
-      save: () => scope.mutate(value => ({ ...value, searchProviders: this.fields[0].parse(state.searchProviders.text).value, quotaRecord: this.fields[1].parse(state.quotaRecord.text).value, quotaIntervalMinutes: this.fields[2].parse(state.quotaIntervalMinutes.text).value, quotaHistoryDays: this.fields[3].parse(state.quotaHistoryDays.text).value })),
+      save: () => scope.mutate(value => ({ ...value, searchProviders: this.fields[0].parse(state.searchProviders.text).value, searchMaxResults: this.fields[1].parse(state.searchMaxResults.text).value, quotaRecord: this.fields[2].parse(state.quotaRecord.text).value, quotaIntervalMinutes: this.fields[3].parse(state.quotaIntervalMinutes.text).value, quotaHistoryDays: this.fields[4].parse(state.quotaHistoryDays.text).value })),
       discard: () => { state.dirty = false },
     } }
     dispose() { formDisposed = true }
   }
   const SettingsForm = () => null
+  const SettingsValueField = () => null
+  const Switch = () => null
   const React = {
     createElement: (type, props, ...children) => ({ type, props: { ...props, children } }),
     useState: () => [undefined, () => {}],
@@ -110,7 +118,7 @@ test('client stages independent OpenAI/ZAI switches and only Codex OAuth without
   const plugin = registered.factory(id => {
     if (id === 'react') return React
     assert.equal(id, '@deepseek-ai/dsh-client-ui-primitives')
-    return { SettingsForm, SettingsFormModel }
+    return { SettingsForm, SettingsFormModel, SettingsValueField, Switch }
   })
   const slots = {
     inject: (_name, callback) => callback(),
@@ -122,7 +130,16 @@ test('client stages independent OpenAI/ZAI switches and only Codex OAuth without
     },
   }
   const scoped = { remote: { searchLogin: {}, quota: {} }, slots }
+  const bundles = {}
+  const locale = {
+    register: (ns, dictionaries) => { bundles[ns] = dictionaries; return () => {} },
+    bind: ns => (key, params) => {
+      const template = bundles[ns]?.zh?.[key] ?? key
+      return params ? template.replace(/\{(\w+)\}/g, (match, name) => (name in params ? String(params[name]) : match)) : template
+    },
+  }
   const dispose = await plugin.apply({
+    locale,
     slots,
     configForms: {
       get: id => { assert.equal(id, 'dsh-provider-hub'); return scope },
@@ -154,37 +171,47 @@ test('client stages independent OpenAI/ZAI switches and only Codex OAuth without
     const visit = node => { if (Array.isArray(node)) { node.forEach(visit); return }; if (node && typeof node === 'object') { nodes.push(node); for (const child of node.props?.children ?? []) visit(child) } }
     visit(form)
     assert.ok(!nodes.some(node => node.type === 'select'), 'there is no exclusive provider dropdown')
-    const switches = nodes.filter(node => node.type === 'input' && node.props.type === 'checkbox' && node.props.role === 'switch' && node.props['data-search-provider'])
-    assert.equal(switches.length, 2)
+    const rows = nodes.filter(node => node.props?.['data-search-provider'])
+    assert.equal(rows.length, 2, 'one labelled row per enhancement toggle')
+    const switches = nodes.filter(node => node.type === Switch && node.props.label.endsWith('搜索增强'))
+    assert.equal(switches.length, 2, 'two enhancement toggles rendered through the official Switch')
     const baseline = nodes.find(node => node.props?.['data-search-baseline'] === 'deepseek-official')
     assert.ok(baseline, 'official baseline is visibly non-interactive, not a third toggle')
     assert.notEqual(baseline.type, 'input')
-    assert.ok(!switches.some(node => node.props['data-search-provider'] === 'deepseek-official'))
+    assert.ok(!rows.some(node => node.props['data-search-provider'] === 'deepseek-official'))
     assert.ok(nodes.some(node => node.type === 'legend' && node.props.children.includes('附加搜索增强')))
     assert.ok(nodes.some(node => node.type === 'legend' && node.props.children.includes('Codex 额度记录')), 'quota settings live in the same card as search settings')
-    const recordSwitch = nodes.find(node => node.props?.['data-quota-record'])
+    const openaiSwitch = nodes.find(node => node.type === Switch && node.props.label === '启用 ChatGPT / Codex 搜索增强')
+    const zaiSwitch = nodes.find(node => node.type === Switch && node.props.label === '启用 Z.AI 搜索增强')
+    const recordSwitch = nodes.find(node => node.type === Switch && node.props.label === '启用每小时额度记录')
     assert.equal(recordSwitch.props.checked, true, 'hourly quota recording defaults on')
-    const intervalInput = nodes.find(node => node.props?.['data-quota-interval'])
-    assert.equal(intervalInput.props.value, '60')
-    const retentionInput = nodes.find(node => node.props?.['data-quota-retention'])
-    assert.equal(retentionInput.props.value, '180')
-    return { form, switches, recordSwitch }
+    const fields = id => nodes.find(node => node.type === SettingsValueField && node.props.id === id)
+    assert.equal(fields('provider-hub-quota-interval').props.text, '60')
+    assert.equal(fields('provider-hub-quota-retention').props.text, '180')
+    const limitField = fields('provider-hub-result-limit')
+    assert.equal(limitField.props.text, '200', 'uniform source cap is editable in the same card')
+    assert.equal(limitField.props.numeric, true)
+    assert.equal(limitField.props.overriddenLabel, '已覆盖')
+    assert.equal(limitField.props.invalid, false)
+    return { form, openaiSwitch, zaiSwitch, recordSwitch }
   }
   let rendered = renderForm()
-  assert.equal(rendered.switches.find(node => node.props['data-search-provider'] === 'openai-codex').props.checked, true)
-  assert.equal(rendered.switches.find(node => node.props['data-search-provider'] === 'zai').props.checked, false)
-  rendered.switches.find(node => node.props['data-search-provider'] === 'zai').props.onChange({ target: { checked: true } })
+  assert.equal(rendered.openaiSwitch.props.checked, true)
+  assert.equal(rendered.zaiSwitch.props.checked, false)
+  rendered.zaiSwitch.props.onChange(true)
   assert.equal(saved, 0, 'changing a toggle stages an edit without mutating global settings')
   rendered = renderForm()
-  assert.ok(rendered.switches.every(node => node.props.checked))
+  assert.equal(rendered.openaiSwitch.props.checked, true)
+  assert.equal(rendered.zaiSwitch.props.checked, true)
   await rendered.form.props.onSave()
   assert.equal(saved, 1)
   assert.equal(JSON.stringify(savedValue.searchProviders), '["openai-codex","zai"]')
-  rendered.switches.find(node => node.props['data-search-provider'] === 'openai-codex').props.onChange({ target: { checked: false } })
+  rendered.openaiSwitch.props.onChange(false)
   rendered = renderForm()
-  rendered.switches.find(node => node.props['data-search-provider'] === 'zai').props.onChange({ target: { checked: false } })
+  rendered.zaiSwitch.props.onChange(false)
   rendered = renderForm()
-  assert.ok(rendered.switches.every(node => !node.props.checked))
+  assert.equal(rendered.openaiSwitch.props.checked, false)
+  assert.equal(rendered.zaiSwitch.props.checked, false)
   assert.equal(saved, 1)
   await rendered.form.props.onSave()
   assert.equal(saved, 2)
@@ -198,13 +225,16 @@ test('client stages independent OpenAI/ZAI switches and only Codex OAuth without
 test('Host mounts native providers without shadowing any preset tool or prompt', () => {
   let plugins = 0
   const registered = []
+  const hooks = []
   apply({
     plugin: () => { plugins++ },
+    on: (event, handler, options) => { hooks.push([event, options]); return () => {} },
     web: { registerSearchProvider: value => { registered.push(value) } },
     tools: { register: () => { throw new Error('Host must not register tools') } },
     systemPrompt: { section: () => { throw new Error('Host must not change preset prompts') } },
-  }, { searchProviders: [], enabledProviders: PROVIDERS, timeoutMs: 60000, quotaRecord: true, quotaIntervalMinutes: 60, quotaHistoryDays: 180 })
+  }, { searchProviders: [], enabledProviders: PROVIDERS, timeoutMs: 60000, searchMaxResults: 200, quotaRecord: true, quotaIntervalMinutes: 60, quotaHistoryDays: 180 })
   assert.equal(plugins, 2, 'search login bridge and quota service mount together')
+  assert.deepEqual(hooks, [['internal/config', { global: true }]], 'the uniform source cap rides the loader config waterfall, not a tool shadow')
   assert.deepEqual(registered.map(provider => provider.id).sort(), [ROUTER_PROVIDER_ID, 'openai-codex', 'zai', 'google-zread'].sort())
   assert.ok(registered.every(provider => typeof provider.search === 'function' && typeof provider.available === 'function'))
 })

@@ -79,7 +79,15 @@ async function mountPanel(quota) {
   let cardFactory
   const capture = { inject: (name, callback) => callback(), register: (seat, callback) => { cardFactory = callback } }
   const searchLogin = { list: async () => ({ ok: true, value: { entries: [{ key: 'llm-pi-ai/openai-codex', authorized: true, methods: [{ id: 'oauth', label: 'OAuth' }], inFlight: false }] } }) }
+  const bundles = {}
   await plugin.apply({
+    locale: {
+      register: (ns, dictionaries) => { bundles[ns] = dictionaries; return () => {} },
+      bind: ns => (key, params) => {
+        const template = bundles[ns]?.zh?.[key] ?? key
+        return params ? template.replace(/\{(\w+)\}/g, (match, name) => (name in params ? String(params[name]) : match)) : template
+      },
+    },
     slots: { inject: (name, callback) => callback(), register: () => {} },
     configForms: { get: () => ({ getSnapshot: () => ({ state: 'unavailable' }), subscribe: () => () => {}, mutate: async () => { throw new Error('not served') } }), whileServed: () => () => {} },
     effect: callback => { callback(); return () => {} },
