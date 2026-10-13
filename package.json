@@ -1,6 +1,6 @@
 {
   "name": "dsh-provider-hub",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Composable global web search, Codex login and account quota for DeepSeek Harness",
   "type": "module",
   "main": "lib/index.js",
