@@ -46,6 +46,30 @@ test('client is a declared boot-roster plugin, not an early head script', () => 
   assert.equal(typeof registered.factory, 'function')
 })
 
+test('Typert metadata declares every endpoint the browser mounts, host and remote face alike', async () => {
+  const host = (await import('../lib/typert.host.js')).TYPERT
+  const remote = (await import('../lib/typert.remote-client.js')).TYPERT_REMOTE
+  const client = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  const ids = list => list.map(item => item.id).sort()
+  assert.deepEqual(ids(host.invocations), ids(remote.descriptors), 'host face and remote face declare the same endpoints')
+  assert.ok(host.invocations.length > 0)
+  for (const descriptor of host.invocations) {
+    // The HTTP gateway serves /api/<namespace>/<method> straight from this
+    // metadata: one missing row is a 404 in the browser, not a broken service.
+    assert.ok(client.includes(`'${descriptor.id}'`), `client mounts ${descriptor.id}`)
+    assert.equal(descriptor.service, descriptor.namespace, 'each namespace is served by its same-named service')
+    assert.equal(descriptor.id, `dsh-provider-hub#${descriptor.namespace}/${descriptor.method}`)
+    assert.deepEqual(descriptor.invocation, { kind: 'direct' })
+    assert.equal(typeof descriptor.result.create().parse, 'function')
+    for (const parameter of descriptor.parameters) assert.equal(typeof parameter.codec.create().parse, 'function')
+  }
+  const endpoints = host.invocations.map(item => `${item.namespace}/${item.method}`)
+  assert.equal(new Set(endpoints).size, endpoints.length, 'no endpoint is declared twice')
+  for (const namespace of ['searchLogin', 'quota', 'keyPool']) {
+    assert.ok(endpoints.some(endpoint => endpoint.startsWith(`${namespace}/`)), `${namespace} endpoints stay mounted`)
+  }
+})
+
 test('client stages independent OpenAI/ZAI switches and only Codex OAuth without owning the settings scope', async () => {
   let registered
   let loginRender

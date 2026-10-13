@@ -86,7 +86,7 @@ const flatten = node => {
 const emptyPool = () => ({
   list: async () => ({ ok: true, value: { entries: [] } }),
   add: async () => ({ ok: true, value: {} }),
-  remove: async () => ({ ok: true, value: {} }),
+  drop: async () => ({ ok: true, value: {} }),
   rename: async () => ({ ok: true, value: {} }),
   setActive: async () => ({ ok: true, value: {} }),
 })
@@ -212,7 +212,7 @@ test('QuotaPanel keeps the sparkline centred and labelled when usage is flat', a
 })
 
 test('API-key provider card previews every pool key and switches the active one', async () => {
-  const calls = { snapshot: [], history: [], setActive: [], remove: [], add: [] }
+  const calls = { snapshot: [], history: [], setActive: [], drop: [], add: [] }
   const quota = {
     snapshot: async request => {
       calls.snapshot.push(request)
@@ -230,7 +230,7 @@ test('API-key provider card previews every pool key and switches the active one'
   const pool = {
     list: async request => ({ ok: true, value: { entries: entries.filter(entry => entry.provider === request.provider) } }),
     add: async request => { calls.add.push(request); return { ok: true, value: {} } },
-    remove: async request => { calls.remove.push(request); return { ok: true, value: {} } },
+    drop: async request => { calls.drop.push(request); return { ok: true, value: {} } },
     setActive: async request => {
       calls.setActive.push(request)
       for (const entry of entries) entry.active = entry.id === request.id
@@ -278,6 +278,6 @@ test('API-key provider card previews every pool key and switches the active one'
 
   nodes.filter(node => node.props?.['data-pool-action'] === 'remove')[0].props.onClick()
   await settleLoop()
-  assert.deepEqual(calls.remove.map(call => ({ ...call })), [{ id: 'aaaa0001' }])
+  assert.deepEqual(calls.drop.map(call => ({ ...call })), [{ id: 'aaaa0001' }])
   assert.ok(!JSON.stringify(flatten(draw())).includes('sk-synthetic'), 'no rendered node ever carries a secret value')
 })
