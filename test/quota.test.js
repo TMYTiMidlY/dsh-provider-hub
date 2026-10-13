@@ -106,18 +106,23 @@ test('history file lives under the plugin-owned DSH_HOME directory', () => {
   assert.ok(quotaHistoryPath('/tmp/synthetic-home').endsWith(join('dsh-provider-hub', 'quota-history.jsonl')))
 })
 
-test('QuotaHistory appends, filters by account and dedupes per hour', async () => {
+test('QuotaHistory appends, filters by provider/account and dedupes per hour', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-quota-history-'))
   try {
     const history = new QuotaHistory(join(dir, 'quota-history.jsonl'))
     await history.append({ ts: 1000, account: 'acct-1', used: { weekly: 10 }, credits: 60000 })
     await history.append({ ts: 2000, account: 'acct-1', used: { weekly: 12 }, credits: 60000 })
     await history.append({ ts: 3000, account: 'acct-2', used: { weekly: 50 } })
+    await history.append({ ts: 5000, provider: 'zai-coding-cn', account: 'key-deadbeef', used: { short: 3 } })
     await history.append({ ts: 5000, account: 'acct-1', used: { weekly: 14 }, credits: 61000 })
-    const points = await history.read('acct-1', 0)
+    // Points recorded before multi-provider support carry no provider and read
+    // back as the Codex account they belong to.
+    const points = await history.read('openai-codex', 'acct-1', 0)
     assert.deepEqual(points, [{ ts: 2000, used: { weekly: 12 }, credits: 60000 }, { ts: 5000, used: { weekly: 14 }, credits: 61000 }])
-    assert.deepEqual(await history.read('acct-1', 2500), [{ ts: 5000, used: { weekly: 14 }, credits: 61000 }])
-    assert.deepEqual(await history.read('acct-none', 0), [])
+    assert.deepEqual(await history.read('openai-codex', 'acct-1', 2500), [{ ts: 5000, used: { weekly: 14 }, credits: 61000 }])
+    assert.deepEqual(await history.read('openai-codex', 'acct-none', 0), [])
+    assert.deepEqual(await history.read('zai-coding-cn', 'key-deadbeef', 0), [{ ts: 5000, used: { short: 3 } }])
+    assert.deepEqual(await history.read('kimi-coding', 'key-deadbeef', 0), [], 'one provider never leaks another provider’s points')
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
@@ -255,9 +260,14 @@ test('the recorder appends history points and honours the quotaRecord switch', a
   try {
     const history = new QuotaHistory(join(dir, 'quota-history.jsonl'))
     const svc = service({ fetchImpl: async () => jsonResponse(liveFixture()), history, config: {} })
-    assert.equal(await svc.record(), 'ok')
+    const recorded = await svc.record()
+    assert.equal(recorded['openai-codex'], 'ok')
+    assert.equal(recorded['xiaomi-token-plan-cn'], 'unsupported', 'the platform without a usage API records nothing')
+    assert.deepEqual(Object.keys(recorded).sort(), ['kimi-coding', 'openai-codex', 'xiaomi-token-plan-cn', 'zai-coding-cn', 'zai'].sort())
     const text = await readFile(join(dir, 'quota-history.jsonl'), 'utf8')
+    assert.equal(text.trim().split('\n').length, 1, 'only credentials that actually resolve record a point')
     const point = JSON.parse(text.trim())
+    assert.equal(point.provider, 'openai-codex')
     assert.equal(point.account, 'acct-1')
     assert.deepEqual(point.used, { weekly: 15 })
     assert.equal(point.credits, 62500)

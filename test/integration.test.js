@@ -152,12 +152,22 @@ test('client stages independent OpenAI/ZAI switches and only Codex OAuth without
       return Object.assign(Promise.resolve(), { dispose: async () => {} })
     },
   })
-  for (const provider of ['zai', 'zai-coding-cn', 'deepseek']) {
+  const expand = node => (node && typeof node.type === 'function' ? expand(node.type(node.props)) : node)
+  for (const provider of ['deepseek', 'anthropic']) {
     const card = loginRender({ provider: { provider } })
-    assert.equal(card.type(card.props), null)
+    assert.equal(expand(card), null, `no hub card for routes without a quota surface (${provider})`)
+  }
+  for (const provider of ['zai', 'zai-coding-cn', 'kimi-coding', 'xiaomi-token-plan-cn']) {
+    const card = loginRender({ provider: { provider }, keyConfigured: true, pool: {}, quota: {} })
+    const section = expand(card)
+    assert.equal(section.props['data-provider-hub-quota'], provider, 'API-key providers get the quota + key-pool card')
+    const nodes = []
+    const visit = node => { if (Array.isArray(node)) { node.forEach(visit); return } if (node && typeof node === 'object') { nodes.push(node); for (const child of node.props?.children ?? []) visit(child) } }
+    visit(section)
+    assert.ok(!nodes.some(node => node.props?.['data-login-action']), 'API-key providers never render an OAuth button')
   }
   const card = loginRender({ provider: { provider: 'openai-codex' } })
-  assert.equal(card.type(card.props).props['data-provider-hub-login'], 'openai-codex')
+  assert.equal(expand(card).props['data-provider-hub-login'], 'openai-codex')
   assert.equal(settingsSeat.name, 'plugins.bundle.config')
   assert.equal(settingsSeat.key, manifest.name)
   assert.equal(settingsSeat.id, undefined, 'the form belongs to the installed bundle, not a separate official card')
@@ -233,7 +243,7 @@ test('Host mounts native providers without shadowing any preset tool or prompt',
     tools: { register: () => { throw new Error('Host must not register tools') } },
     systemPrompt: { section: () => { throw new Error('Host must not change preset prompts') } },
   }, { searchProviders: [], enabledProviders: PROVIDERS, timeoutMs: 60000, searchMaxResults: 200, quotaRecord: true, quotaIntervalMinutes: 60, quotaHistoryDays: 180 })
-  assert.equal(plugins, 2, 'search login bridge and quota service mount together')
+  assert.equal(plugins, 3, 'search login bridge, key pool and quota service mount together')
   assert.deepEqual(hooks, [['internal/config', { global: true }]], 'the uniform source cap rides the loader config waterfall, not a tool shadow')
   assert.deepEqual(registered.map(provider => provider.id).sort(), [ROUTER_PROVIDER_ID, 'openai-codex', 'zai', 'google-zread'].sort())
   assert.ok(registered.every(provider => typeof provider.search === 'function' && typeof provider.available === 'function'))

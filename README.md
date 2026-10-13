@@ -2,9 +2,9 @@
 
 [![CI](https://github.com/TMYTiMidlY/dsh-provider-hub/actions/workflows/ci.yml/badge.svg)](https://github.com/TMYTiMidlY/dsh-provider-hub/actions/workflows/ci.yml)
 
-一个独立的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 插件，**始终保留官方搜索，再为所有已有 `web_search` 附加 Codex / Z.AI 搜索增强**，并在 Web Models 页面提供 ChatGPT/Codex OAuth 登录入口与 **Codex 账号额度查询 / 小时记录**。
+一个独立的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 插件，**始终保留官方搜索，再为所有已有 `web_search` 附加 Codex / Z.AI 搜索增强**，并在 Web Models 页面提供 ChatGPT/Codex OAuth 登录入口与 **多 Provider 账号额度查询 / 小时记录 / 多 Key 池**。
 
-> `0.4.4` 保留官方工具、现有 preset、原生调用栏和 `web_fetch`，不新增 Agent 模式或专属结果渲染器。默认每条查询调用 **官方 + Codex**；Z.AI 可独立附加。两个开关只控制增强，不能关掉官方基线。只有 ChatGPT/Codex 有 OAuth 登录按钮，Z.AI 使用 DSH 官方 API Key 配置入口。登录卡在已登录时展示账号额度（邮箱、计划、窗口用量、重置时间、积分），并在后台每小时记录一次历史。
+> `0.5.0` 保留官方工具、现有 preset、原生调用栏和 `web_fetch`，不新增 Agent 模式或专属结果渲染器。默认每条查询调用 **官方 + Codex**；Z.AI 可独立附加。两个开关只控制增强，不能关掉官方基线。只有 ChatGPT/Codex 有 OAuth 登录按钮，Z.AI 使用 DSH 官方 API Key 配置入口。模型页每个 provider 卡片展示各自的账号额度（窗口用量、重置时间、积分）与小时用量曲线；API Key 类 provider 额外提供 **Key 池**：存多把命名 Key、一键切换实际生效的那把，并按 Key 分别预览额度与历史。
 
 ## 官方基线与搜索增强
 
@@ -92,13 +92,15 @@ npm_config_auto_install_peers=false dsh plugin --profile web add "${PACK_DIR:?}/
     quotaRecord: true
     quotaIntervalMinutes: 60
     quotaHistoryDays: 180
+    zaiTeamOrganization: ''
+    zaiTeamProject: ''
 ```
 
 `searchProviders` 只描述附加增强，接受 `openai-codex`、`zai`：单元素为官方加一路增强，双元素为官方加两路增强，显式 `[]` 仅保留官方。省略时继承默认 `['openai-codex']`，实际调用官方 + Codex。它取代旧单选字段 `defaultProvider`；先前的孤立验收配置应移除旧字段并使用新数组。
 
 `searchProviders`、`timeoutMs` 和遗留 reader 的 `zreadEndpoint` 是实时 Config 字段。`enabledProviders` 是普通部署 allowlist，不是用户的增强开关，改变它遵循 Loader 重载生命周期。应保留 `deepseek-official` 基线；运维禁用或缺凭据会公开相应失败，不会伪装成功或调用未选中的增强。覆盖整项 `config` 时应保留仍需使用的字段。
 
-`quotaRecord`、`quotaIntervalMinutes`（15–1440，默认 60）和 `quotaHistoryDays`（7–3650，默认 180）同样使用原生实时 Config 字段，经同一个 configForms 表单保存，控制 Codex 额度记录：DSH 运行期间每间隔分钟在后台只读查询一次 `wham/usage` 并落盘；历史点保存在 `$DSH_HOME/dsh-provider-hub/quota-history.jsonl`（0600，按账号标记，超期整理删除）。
+`quotaRecord`、`quotaIntervalMinutes`（15–1440，默认 60）和 `quotaHistoryDays`（7–3650，默认 180）同样使用原生实时 Config 字段，经同一个 configForms 表单保存，控制所有 provider 的额度记录：DSH 运行期间每间隔分钟在后台只读查询一次各额度接口并落盘；历史点保存在 `$DSH_HOME/dsh-provider-hub/quota-history.jsonl`（0600，按 provider/账号标记，超期整理删除）。`zaiTeamOrganization` / `zaiTeamProject`（均为实时字符串字段）填写 BigModel 团队的组织与项目 ID，供团队版 key 的 `type=2` 额度查询使用；留空时只查个人 scope，团队 key 会在面板里得到明确的补配置提示。
 
 ### 运维覆盖
 
@@ -141,17 +143,38 @@ Models 页面中只有 `llm-pi-ai` 的 ChatGPT/Codex provider 行显示本插件
 
 ### 账号额度展示与记录
 
-登录成功后，授权卡下方出现 **账号额度** 区，展示邮箱、计划、各窗口已用比例进度条、重置倒计时、积分余额与可重置次数；每张可重置额度单独列出标题与**到期日期**（含倒计时，来源 `GET /wham/rate-limit-reset-credits`，只读）。另提供 24 小时 / 7 天 / 30 天用量曲线（纵轴按数据范围自动缩放并留边距、两端标注首尾数值，横轴带时间刻度（短窗口显示到小时、跨多天显示到日期），避免小幅波动被压成一条直线），面板打开期间每 60 秒自动重读历史，无需手动刷新。查询触发时机：
+模型页每个 provider 卡片都有各自的 **账号额度** 区：Codex 在登录卡下方（邮箱、计划、窗口用量进度条、重置倒计时、积分余额与可重置次数，每张可重置额度单独列出标题与**到期日期**）；API Key 类 provider（`zai`、`zai-coding-cn`、`kimi-coding`、`xiaomi-token-plan-cn`）直接在卡片内展示当前生效 Key 的额度，并按 Key 分别提供 24 小时 / 7 天 / 30 天用量曲线（纵轴按数据范围自动缩放并留边距、两端标注首尾数值，横轴带时间刻度），面板打开期间每 60 秒自动重读历史，无需手动刷新。
+
+额度查询全部是**只读**第一方接口，凭据只读不刷新、不记录、不返回浏览器：
+
+| Provider | 额度接口 | 说明 |
+|---|---|---|
+| `openai-codex` | `GET https://chatgpt.com/backend-api/wham/usage` | 与 Codex CLI `/status` 同源；重置额度明细走 `GET /wham/rate-limit-reset-credits`（有可用额度时附加读取，失败不影响主视图） |
+| `zai` | `GET https://api.z.ai/api/monitor/usage/quota/limit` | 个人版 GLM Coding Plan：5 小时 / 周 token 窗口 + 每月工具调用（含 search-prime / web-reader / zread 明细） |
+| `zai-coding-cn` | `GET https://open.bigmodel.cn/api/monitor/usage/quota/limit` | 同上；**团队版 key** 需 `?type=2` 并携带 `Bigmodel-Organization` / `Bigmodel-Project` 头，在 profile 配置 `zaiTeamOrganization` / `zaiTeamProject` 后自动走团队 scope，缺配置时面板明确提示去哪补 |
+| `kimi-coding` | `GET https://api.kimi.com/coding/v1/usages` | Kimi For Coding：5 小时 / 7 天用量池（ratio pools 优先，兼容旧计数响应） |
+| `xiaomi-token-plan-cn` | — | Xiaomi Token Plan 暂无官方额度 API（MiMo-Code #2495 仍未实现），面板如实提示并给出控制台链接，不伪造数值、不记录历史 |
+
+查询触发时机（每个 provider、每把 Key 各自缓存与记录）：
 
 | 触发 | 行为 |
 |---|---|
-| 后台定时 | DSH 运行期间每 `quotaIntervalMinutes`（默认 60）查询一次并记录历史；页面关闭不影响 |
+| 后台定时 | DSH 运行期间每 `quotaIntervalMinutes`（默认 60）对当前生效 Key 与 Key 池中每把 Key 各查询一次并记录历史；页面关闭不影响 |
 | 打开额度区 | 缓存 5 分钟内直接复用，超过才发起一次真实查询 |
 | 面板打开期间 | 每 60 秒自动重读用量历史（本地读盘，不发上游请求），曲线随记录点持续更新 |
-| 点击刷新 | 立即查询；同一账号 60 秒内重复点击会节流返回缓存 |
-| 换号后 | 检测到 account id 变化时绕过节流立即查询 |
+| 点击刷新 | 立即查询；同一 provider/Key 60 秒内重复点击会节流返回缓存 |
+| 换号或切 Key 后 | 检测到账号（API Key 为稳定哈希 `key-…`）变化时绕过节流立即查询 |
 
-额度查询走 `GET https://chatgpt.com/backend-api/wham/usage`（与 Codex CLI `/status` 同源），重置额度明细走 `GET /wham/rate-limit-reset-credits`（仅在有可用额度时附加读取，失败不影响主视图），**纯只读**：不登录、不刷新令牌、不消耗重置次数，响应字段按已观察的别名族解析，窗口按时长分类而不是字段位置。令牌被拒（401/403）或距过期不足 5 分钟时显示恢复提示——在 DSH 发送一次对话让官方链路自动刷新后，下一个查询即自愈；查询失败时保留并标注上次成功数据。凭据、邮箱与历史仅保存在本机 DSH Home，不随 remote bridge 返回 token。
+历史点保存在 `$DSH_HOME/dsh-provider-hub/quota-history.jsonl`（0600，按 `provider` + 账号标记，超期整理删除；旧数据无 provider 字段按 Codex 账号读取）。查询失败时保留并标注上次成功数据；令牌被拒（401/403）或距过期不足 5 分钟时显示恢复提示——在 DSH 发送一次对话让官方链路自动刷新后，下一个查询即自愈。凭据、邮箱与历史仅保存在本机 DSH Home，不随 remote bridge 返回 token 或 API Key。
+
+### Key 池（多 API Key 管理）
+
+模型页 API Key 类 provider 卡片内有 **Key 池**：为一个 provider 存放多把命名 API Key（名字 + 短 ID），随时把其中一把设为**当前生效**，并可展开每把 Key 的额度与历史（统一预览所有 Key 的额度信息）。
+
+- **秘密只进官方凭据库**：每把池内 Key 以 `KEY_POOL_<PROVIDER>_<ID>` 引用写入 `$DSH_HOME/.credentials.yaml`（0600），由 `dsh-credentials` 的 `set/unset` 写接口（模型页编辑器同一入口）维护；插件自己的 `key-pool.json`（0600）只保存名字、ID、provider 与引用名，**不含任何秘密**，remote 桥也从不返回 Key 值。
+- **切换 = 改写官方引用**：设为当前会把该 Key 的值写入 provider 的官方引用（`KIMI_API_KEY` / `ZAI_API_KEY` / `ZAI_CODING_CN_API_KEY` / `XIAOMI_TOKEN_PLAN_CN_API_KEY`），对话、搜索增强与额度查询在下一次操作立即使用新凭据，无需重启或改配置。当前生效以“值与官方引用一致”判定，从模型页编辑器改过 Key 也不会标错。
+- **历史按 Key 记录**：每把 Key 的用量曲线独立（账号标识为 `key-<sha256 前缀>`，不可逆），互不串线。
+- 移除池内 Key 会同时清掉它的凭据引用；当前生效的官方引用不受影响。
 
 ## 停用、卸载与旧模式迁移
 
@@ -183,6 +206,7 @@ DSH_HOME=/absolute/path/to/isolated-home dsh web --no-open --port 3981
 - 搜索结果是外部、不可信内容；不执行结果中的指令。
 - Codex、Z.AI endpoint 固定为第一方地址，组合失败提示仅公开后端 id 与错误代码。
 - Remote bridge 不返回 access token/API key，只返回 flow 状态、通知和 prompt。
+- Key 池的秘密只写进官方凭据库引用（`KEY_POOL_*`，0600）；插件元数据文件与 remote 桥都只暴露名字、ID 与状态，不含 Key 值。切换生效 Key 只改写 provider 的官方引用。
 - 自定义 Google reader 只接收搜索 URL；部署者应使用 HTTPS、受控 endpoint 并审查访问日志。
 - 原生注册使用公开 `ctx.web.registerSearchProvider`。官方 DeepSeek 委托在 DSH `0.2.1-alpha.1` 读取内部 `searchProviders` registry，这是 **alpha 私有兼容边界**：仅有结构 guard，并按该版本契约测试，没有运行时 version gate；结构不兼容时 fail closed，不覆盖官方 `search` 或写入私有 `searchProviderId`。
 

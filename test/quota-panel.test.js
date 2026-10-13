@@ -3,38 +3,48 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
 
-// Minimal hook-capable React stand-in: enough to drive LoginCard + QuotaPanel
-// mount, async load, state updates and re-renders, as the browser would.
+// Minimal hook-capable React stand-in: function components expand inline and
+// each instance keeps its own hook state, keyed by tree path plus React key —
+// the same isolation real reconciliation gives conditionally mounted panels.
 function createHarness() {
-  const slots = []
-  let cursor = 0
+  const states = new Map()
+  const root = { path: '#root', counters: new Map(), cursor: 0 }
+  const stack = [root]
+  const hooks = () => {
+    const frame = stack[stack.length - 1]
+    const slots = states.get(frame.path) ?? []
+    states.set(frame.path, slots)
+    return { frame, slots }
+  }
   const React = {
-    // Auto-expand function components so one render pass executes hooks in
-    // true top-down order; collapse single children like real React does.
     createElement: (type, props, ...children) => {
       const merged = { ...props, children: children.length <= 1 ? children[0] : children }
-      if (typeof type === 'function') return type(merged)
-      return { type, props: merged }
+      if (typeof type !== 'function') return { type, props: merged }
+      const parent = stack[stack.length - 1]
+      const identity = props?.key !== undefined ? `key:${props.key}` : `${type.name || 'anon'}:${parent.counters.get(type) ?? 0}`
+      if (props?.key === undefined) parent.counters.set(type, (parent.counters.get(type) ?? 0) + 1)
+      stack.push({ path: `${parent.path}/${identity}`, counters: new Map(), cursor: 0 })
+      try { return type(merged) } finally { stack.pop() }
     },
     Fragment: Symbol.for('react.fragment'),
     useState(initial) {
-      const index = cursor++
-      const slot = slots[index] ??= { value: typeof initial === 'function' ? initial() : initial }
+      const { frame, slots } = hooks()
+      const slot = slots[frame.cursor++] ??= { value: typeof initial === 'function' ? initial() : initial }
       return [slot.value, value => { slot.value = typeof value === 'function' ? value(slot.value) : value }]
     },
     useRef(initial) {
-      const index = cursor++
-      slots[index] ??= { ref: { current: initial } }
-      return slots[index].ref
+      const { frame, slots } = hooks()
+      slots[frame.cursor++] ??= { ref: { current: initial } }
+      return slots[frame.cursor - 1].ref
     },
     useEffect(effect) {
-      const index = cursor++
-      slots[index] ??= { ran: false }
-      if (!slots[index].ran) slots[index].ran = true, effect()
+      const { frame, slots } = hooks()
+      const slot = slots[frame.cursor++] ??= { ran: false }
+      if (!slot.ran) { slot.ran = true; effect() }
     },
-    useCallback(fn) { cursor++; return fn },
+    useCallback(fn) { hooks().frame.cursor++; return fn },
   }
-  const render = factory => { cursor = 0; return factory() }
+  const render = factory => { root.counters = new Map(); root.cursor = 0; return factory() }
   return { React, render }
 }
 
@@ -73,7 +83,17 @@ const flatten = node => {
   return []
 }
 
-async function mountPanel(quota) {
+const emptyPool = () => ({
+  list: async () => ({ ok: true, value: { entries: [] } }),
+  add: async () => ({ ok: true, value: {} }),
+  remove: async () => ({ ok: true, value: {} }),
+  rename: async () => ({ ok: true, value: {} }),
+  setActive: async () => ({ ok: true, value: {} }),
+})
+
+async function mountPanel(quota, options = {}) {
+  const provider = options.provider ?? 'openai-codex'
+  const pool = options.pool ?? emptyPool()
   const { React, render } = createHarness()
   const plugin = loadClient(React)
   let cardFactory
@@ -92,11 +112,11 @@ async function mountPanel(quota) {
     configForms: { get: () => ({ getSnapshot: () => ({ state: 'unavailable' }), subscribe: () => () => {}, mutate: async () => { throw new Error('not served') } }), whileServed: () => () => {} },
     effect: callback => { callback(); return () => {} },
     remote: { $mount: async () => async () => {} },
-    inject: (_deps, callback) => { callback({ remote: { searchLogin, quota }, slots: capture }); return Object.assign(Promise.resolve(), { dispose: async () => {} }) },
+    inject: (_deps, callback) => { callback({ remote: { searchLogin, quota, keyPool: pool }, slots: capture }); return Object.assign(Promise.resolve(), { dispose: async () => {} }) },
   })
   assert.ok(cardFactory, 'provider-card render captured')
-  const draw = () => render(() => cardFactory({ provider: { provider: 'openai-codex' } }))
-  return { draw }
+  const draw = () => render(() => cardFactory({ provider: { provider }, keyConfigured: options.keyConfigured ?? (provider === 'openai-codex'), pool, quota }))
+  return { draw, pool }
 }
 
 const settle = async () => { for (let i = 0; i < 6; i++) await new Promise(resolve => setImmediate(resolve)) }
@@ -189,4 +209,75 @@ test('QuotaPanel keeps the sparkline centred and labelled when usage is flat', a
   const ticks = nodes.filter(node => node.props?.['data-quota-spark-tick'])
   assert.equal(ticks.length, 3, 'flat series still carries the time axis')
   assert.ok(ticks.every(tick => /^\d{2}-\d{2}$/.test(tick.props.children)), 'multi-day span shows day-precision ticks')
+})
+
+test('API-key provider card previews every pool key and switches the active one', async () => {
+  const calls = { snapshot: [], history: [], setActive: [], remove: [], add: [] }
+  const quota = {
+    snapshot: async request => {
+      calls.snapshot.push(request)
+      return { ok: true, value: { status: 'ok', snapshot: { account: `acct-${request.keyId ?? 'active'}`, windows: [{ kind: 'weekly', usedPercent: 30 }] }, fetchedAt: Math.floor(Date.now() / 1000) } }
+    },
+    history: async request => {
+      calls.history.push(request)
+      return { ok: true, value: { status: 'ok', points: Array.from({ length: 3 }, (_, index) => ({ ts: 1791721950 + index * 3600, used: { weekly: 30 + index } })) } }
+    },
+  }
+  const entries = [
+    { id: 'aaaa0001', name: 'zai-gsj', provider: 'zai-coding-cn', configured: true, active: true },
+    { id: 'aaaa0002', name: 'zai-team', provider: 'zai-coding-cn', configured: true, active: false },
+  ]
+  const pool = {
+    list: async request => ({ ok: true, value: { entries: entries.filter(entry => entry.provider === request.provider) } }),
+    add: async request => { calls.add.push(request); return { ok: true, value: {} } },
+    remove: async request => { calls.remove.push(request); return { ok: true, value: {} } },
+    setActive: async request => {
+      calls.setActive.push(request)
+      for (const entry of entries) entry.active = entry.id === request.id
+      return { ok: true, value: {} }
+    },
+    rename: async () => ({ ok: true, value: {} }),
+  }
+  const { draw } = await mountPanel(quota, { provider: 'zai-coding-cn', pool, keyConfigured: true })
+  const settleLoop = async () => { for (let i = 0; i < 8; i++) { await new Promise(resolve => setImmediate(resolve)); draw() } }
+  draw()
+  await settleLoop()
+  let nodes = flatten(draw())
+  const section = nodes.find(node => node.props?.['data-provider-hub-quota'])
+  assert.equal(section.props['data-provider-hub-quota'], 'zai-coding-cn')
+  const rows = nodes.filter(node => node.props?.['data-pool-entry'])
+  assert.deepEqual(rows.map(row => row.props['data-pool-entry']), ['aaaa0001', 'aaaa0002'], 'one row per stored key, in order')
+  assert.deepEqual(rows.map(row => row.props['data-pool-active']), ['true', 'false'])
+  assert.equal(nodes.filter(node => node.props?.['data-quota-section']).length, 1, 'the active key carries its quota panel')
+  assert.equal(calls.snapshot[0].provider, 'zai-coding-cn', 'the active panel queries the official credential')
+  assert.equal(calls.snapshot[0].keyId, undefined, 'the active panel rides the route credential, not a pool key')
+  assert.equal(calls.snapshot[0].maxAgeMs, 300000)
+
+  // Expanding a pool key mounts its own panel against that key alone.
+  nodes.filter(node => node.props?.['data-pool-action'] === 'details')[1].props.onClick()
+  await settleLoop()
+  nodes = flatten(draw())
+  assert.equal(nodes.filter(node => node.props?.['data-quota-section']).length, 2, 'each expanded key previews its own quota')
+  assert.equal(calls.snapshot.at(-1).keyId, 'aaaa0002', 'the expanded panel names its pool key')
+
+  // Switching marks the entry active and refreshes the pool view (only the
+  // inactive entry offers the switch).
+  nodes.filter(node => node.props?.['data-pool-action'] === 'use')[0].props.onClick()
+  await settleLoop()
+  nodes = flatten(draw())
+  assert.deepEqual(calls.setActive.map(call => ({ ...call })), [{ id: 'aaaa0002' }])
+  assert.deepEqual(nodes.filter(node => node.props?.['data-pool-entry']).map(row => row.props['data-pool-active']), ['false', 'true'])
+
+  // The add form stores a named key through the pool remote.
+  const form = nodes.find(node => node.props?.['data-pool-add'])
+  await form.props.onSubmit({
+    preventDefault: () => {},
+    currentTarget: { elements: { name: { value: 'zai-new' }, value: { value: 'sk-synthetic-new' } }, reset: () => {} },
+  })
+  assert.deepEqual(calls.add.map(call => ({ ...call })), [{ provider: 'zai-coding-cn', name: 'zai-new', value: 'sk-synthetic-new' }])
+
+  nodes.filter(node => node.props?.['data-pool-action'] === 'remove')[0].props.onClick()
+  await settleLoop()
+  assert.deepEqual(calls.remove.map(call => ({ ...call })), [{ id: 'aaaa0001' }])
+  assert.ok(!JSON.stringify(flatten(draw())).includes('sk-synthetic'), 'no rendered node ever carries a secret value')
 })
