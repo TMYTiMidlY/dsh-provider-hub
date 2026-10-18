@@ -16,3 +16,5 @@
         quotaRecord: true
         quotaIntervalMinutes: 60
         quotaHistoryDays: 180
+        imageProviders: [openai-codex]
+        imageTimeoutMs: 300000

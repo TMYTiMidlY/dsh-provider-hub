@@ -1,24 +1,32 @@
 {
   "name": "dsh-provider-hub",
-  "version": "0.5.2",
-  "description": "Composable global web search, Codex login and account quota for DeepSeek Harness",
+  "version": "0.6.0",
+  "description": "Composable web search, Codex login, account quota and image tools for DeepSeek Harness",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
     "./tool": "./lib/tool.js",
+    "./images": "./lib/images.js",
     "./client": "./lib/client.js",
     "./typert": "./lib/typert.host.js",
     "./remote": "./lib/typert.remote-client.js",
     "./package.json": "./package.json"
   },
-  "files": ["lib", "cordis.patch.yml", "README.md", "LICENSE"],
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "test": "node --test test/*.test.js",
-    "check": "npm test && node --check lib/index.js && node --check lib/tool.js && node --check lib/providers.js && node --check lib/quota.js && node --check lib/client.js && node --check lib/codecs.js && node --check lib/typert.host.js && node --check lib/typert.remote-client.js",
+    "check": "npm test && node --check lib/index.js && node --check lib/tool.js && node --check lib/providers.js && node --check lib/quota.js && node --check lib/images.js && node --check lib/image-auth.js && node --check lib/image-providers.js && node --check lib/client.js && node --check lib/codecs.js && node --check lib/typert.host.js && node --check lib/typert.remote-client.js",
     "pack:check": "npm pack --dry-run"
   },
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "license": "MIT",
   "dependencies": {
     "@deepseek-ai/schemastery": "3.18.5-alpha.1"
@@ -30,14 +38,30 @@
     "@deepseek-ai/dsh-credentials": ">=0.2.1-alpha.1",
     "@deepseek-ai/dsh-tools": ">=0.2.1-alpha.1",
     "@deepseek-ai/dsh-typert-protocol": ">=0.2.1-alpha.1",
-    "@deepseek-ai/dsh-web": ">=0.2.1-alpha.1"
+    "@deepseek-ai/dsh-web": ">=0.2.1-alpha.1",
+    "@deepseek-ai/dsh-attachment": ">=0.2.1-alpha.1",
+    "@deepseek-ai/dsh-llm": ">=0.2.1-alpha.1",
+    "@earendil-works/pi-ai": "0.87.1"
   },
   "dsh": {
-    "bundle": { "patch": "./cordis.patch.yml" },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "platform": "web",
-      "inject": ["@deepseek-ai/dsh-api-remotes", "@deepseek-ai/dsh-client-ui-settings-models", "@deepseek-ai/dsh-client-ui-settings", "@deepseek-ai/dsh-client-ui-plugin-manager"],
-      "external": ["react", "@deepseek-ai/dsh-client-ui-primitives"]
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-ui-settings-models",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
+      ],
+      "external": [
+        "react",
+        "@deepseek-ai/dsh-client-ui-primitives"
+      ]
     }
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh-client-ui-primitives": "0.2.1-alpha.1"
   }
 }

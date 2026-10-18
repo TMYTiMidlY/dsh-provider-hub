@@ -20,13 +20,18 @@ test('package pins a private volatile-capable Schema builder without bundling du
     '@deepseek-ai/dsh-authorization': '>=0.2.1-alpha.1',
     '@deepseek-ai/dsh-credentials': '>=0.2.1-alpha.1',
     '@deepseek-ai/dsh-tools': '>=0.2.1-alpha.1',
+    '@deepseek-ai/dsh-attachment': '>=0.2.1-alpha.1',
+    '@deepseek-ai/dsh-llm': '>=0.2.1-alpha.1',
+    '@earendil-works/pi-ai': '0.87.1',
     '@deepseek-ai/dsh-typert-protocol': '>=0.2.1-alpha.1',
     '@deepseek-ai/dsh-web': '>=0.2.1-alpha.1',
   })
+  assert.deepEqual(manifest.devDependencies, { '@deepseek-ai/dsh-client-ui-primitives': '0.2.1-alpha.1' }, 'real-model settings tests need the browser library in CI')
+  assert.equal(manifest.exports['./images'], './lib/images.js')
 })
 
 test('the native settings schema exposes every hub UI field for live saves', () => {
-  for (const field of ['searchProviders', 'quotaRecord', 'quotaIntervalMinutes', 'quotaHistoryDays']) {
+  for (const field of ['searchProviders', 'imageProviders', 'imageTimeoutMs', 'quotaRecord', 'quotaIntervalMinutes', 'quotaHistoryDays']) {
     assert.equal(Config.dict[field].meta.volatile, true, `${field} must be editable via configForms`)
   }
   assert.equal(Config.dict.quotaRecord.meta.default, true)
@@ -80,39 +85,47 @@ test('client stages independent OpenAI/ZAI switches and only Codex OAuth without
   let formDisposed = false
   let watchDisposed = false
   const effects = []
-  const state = { writable: true, saving: false, dirty: false, searchProviders: { text: '["openai-codex"]', overridden: false, invalid: false }, searchMaxResults: { text: '200', overridden: false, invalid: false }, quotaRecord: { text: 'true', overridden: false, invalid: false }, quotaIntervalMinutes: { text: '60', overridden: false, invalid: false }, quotaHistoryDays: { text: '180', overridden: false, invalid: false } }
+  const state = { writable: true, saving: false, dirty: false, searchProviders: { text: '["openai-codex"]', overridden: false, invalid: false }, imageProviders: { text: '["openai-codex"]', overridden: false, invalid: false }, searchMaxResults: { text: '200', overridden: false, invalid: false }, quotaRecord: { text: 'true', overridden: false, invalid: false }, quotaIntervalMinutes: { text: '60', overridden: false, invalid: false }, quotaHistoryDays: { text: '180', overridden: false, invalid: false } }
   const scope = {
-    getSnapshot: () => ({ state: 'served', fields: { searchProviders: { value: ['openai-codex'] }, searchMaxResults: { value: 200 }, quotaRecord: { value: true }, quotaIntervalMinutes: { value: 60 }, quotaHistoryDays: { value: 180 } } }),
+    getSnapshot: () => ({ state: 'served', fields: { searchProviders: { value: ['openai-codex'] }, imageProviders: { value: ['openai-codex'] }, searchMaxResults: { value: 200 }, quotaRecord: { value: true }, quotaIntervalMinutes: { value: 60 }, quotaHistoryDays: { value: 180 } } }),
     subscribe: () => () => {},
-    mutate: async callback => { saved++; savedValue = callback({ searchProviders: ['openai-codex'], searchMaxResults: 200, quotaRecord: true, quotaIntervalMinutes: 60, quotaHistoryDays: 180 }); return savedValue },
+    mutate: async callback => { saved++; savedValue = callback({ searchProviders: ['openai-codex'], imageProviders: ['openai-codex'], searchMaxResults: 200, quotaRecord: true, quotaIntervalMinutes: 60, quotaHistoryDays: 180 }); return savedValue },
     dispose: () => { throw new Error('shared configForms scope must not be disposed by client') },
   }
   class SettingsFormModel {
     constructor(received, fields) {
       assert.equal(received, scope)
-      assert.equal(fields.length, 5)
+      assert.equal(fields.length, 6)
       assert.equal(fields[0].field, 'searchProviders')
       assert.equal(fields[0].format(['openai-codex', 'zai']), '["openai-codex","zai"]')
       assert.equal(JSON.stringify(fields[0].parse('[]').value), '[]')
       assert.equal(fields[0].parse('["deepseek-official"]'), undefined)
       assert.equal(fields[0].parse('["google-zread"]'), undefined)
       assert.equal(fields[0].parse('"zai"'), undefined)
-      assert.equal(JSON.stringify(fields.slice(1).map(field => field.field)), JSON.stringify(['searchMaxResults', 'quotaRecord', 'quotaIntervalMinutes', 'quotaHistoryDays']))
-      assert.equal(fields[1].format(200), '200')
-      assert.equal(fields[1].format('nonsense'), '200')
-      assert.equal(JSON.stringify(fields[1].parse('45')), JSON.stringify({ kind: 'set', value: 45 }))
-      assert.equal(JSON.stringify(fields[1].parse('')), JSON.stringify({ kind: 'clear' }), 'an empty draft clears the override back to the composition value')
-      assert.equal(fields[1].parse('0'), undefined, 'source cap below schema minimum is staged as invalid')
-      assert.equal(fields[1].parse('1001'), undefined)
-      assert.equal(fields[2].format(false), 'false')
-      assert.equal(fields[2].format(undefined), 'true')
-      assert.equal(JSON.stringify(fields[2].parse('false')), JSON.stringify({ kind: 'set', value: false }))
+      assert.equal(fields[1].field, 'imageProviders')
+      assert.equal(fields[1].format(undefined), '["openai-codex"]', 'a missing image field inherits the schema default')
+      assert.equal(fields[1].format(['openai-codex', 'zai', 'zai-cn']), '["openai-codex","zai","zai-cn"]')
+      assert.equal(fields[1].format('junk'), '[]')
+      assert.equal(JSON.stringify(fields[1].parse('["openai-codex","zai"]').value), JSON.stringify(['openai-codex', 'zai']))
+      assert.equal(JSON.stringify(fields[1].parse('[]').value), '[]', 'explicit all-off stays off')
+      assert.equal(fields[1].parse('["zai-coding-cn"]'), undefined, 'credential-source ids are not image tools')
+      assert.equal(fields[1].parse('["deepseek-official"]'), undefined)
+      assert.equal(JSON.stringify(fields.slice(2).map(field => field.field)), JSON.stringify(['searchMaxResults', 'quotaRecord', 'quotaIntervalMinutes', 'quotaHistoryDays']))
+      assert.equal(fields[2].format(200), '200')
+      assert.equal(fields[2].format('nonsense'), '200')
+      assert.equal(JSON.stringify(fields[2].parse('45')), JSON.stringify({ kind: 'set', value: 45 }))
+      assert.equal(JSON.stringify(fields[2].parse('')), JSON.stringify({ kind: 'clear' }), 'an empty draft clears the override back to the composition value')
+      assert.equal(fields[2].parse('0'), undefined, 'source cap below schema minimum is staged as invalid')
+      assert.equal(fields[2].parse('1001'), undefined)
+      assert.equal(fields[3].format(false), 'false')
+      assert.equal(fields[3].format(undefined), 'true')
+      assert.equal(JSON.stringify(fields[3].parse('false')), JSON.stringify({ kind: 'set', value: false }))
       assert.equal(fields[2].parse('yes'), undefined)
-      assert.equal(fields[3].format(45), '45')
-      assert.equal(fields[3].format('nonsense'), '60')
-      assert.equal(JSON.stringify(fields[3].parse('45')), JSON.stringify({ kind: 'set', value: 45 }))
-      assert.equal(fields[3].parse('5'), undefined, 'interval below schema minimum is staged as invalid')
-      assert.equal(fields[4].parse('999999'), undefined)
+      assert.equal(fields[4].format(45), '45')
+      assert.equal(fields[4].format('nonsense'), '60')
+      assert.equal(JSON.stringify(fields[4].parse('45')), JSON.stringify({ kind: 'set', value: 45 }))
+      assert.equal(fields[4].parse('5'), undefined, 'interval below schema minimum is staged as invalid')
+      assert.equal(fields[5].parse('999999'), undefined)
       this.fields = fields
     }
     bind(project) { return { getSnapshot: project, subscribe: () => () => {} } }
@@ -120,8 +133,8 @@ test('client stages independent OpenAI/ZAI switches and only Codex OAuth without
     field(name) { return state[name] }
     actions() { return {
       edit: (name, value) => { state[name] = { ...state[name], text: value }; state.dirty = true },
-      resetField: name => { state[name] = { ...state[name], text: '["openai-codex"]' } },
-      save: () => scope.mutate(value => ({ ...value, searchProviders: this.fields[0].parse(state.searchProviders.text).value, searchMaxResults: this.fields[1].parse(state.searchMaxResults.text).value, quotaRecord: this.fields[2].parse(state.quotaRecord.text).value, quotaIntervalMinutes: this.fields[3].parse(state.quotaIntervalMinutes.text).value, quotaHistoryDays: this.fields[4].parse(state.quotaHistoryDays.text).value })),
+      resetField: name => { state[name] = { ...state[name], text: name === 'imageProviders' ? '["openai-codex"]' : '["openai-codex"]' } },
+      save: () => scope.mutate(value => ({ ...value, searchProviders: this.fields[0].parse(state.searchProviders.text).value, imageProviders: this.fields[1].parse(state.imageProviders.text).value, searchMaxResults: this.fields[2].parse(state.searchMaxResults.text).value, quotaRecord: this.fields[3].parse(state.quotaRecord.text).value, quotaIntervalMinutes: this.fields[4].parse(state.quotaIntervalMinutes.text).value, quotaHistoryDays: this.fields[5].parse(state.quotaHistoryDays.text).value })),
       discard: () => { state.dirty = false },
     } }
     dispose() { formDisposed = true }
@@ -267,7 +280,7 @@ test('Host mounts native providers without shadowing any preset tool or prompt',
     tools: { register: () => { throw new Error('Host must not register tools') } },
     systemPrompt: { section: () => { throw new Error('Host must not change preset prompts') } },
   }, { searchProviders: [], enabledProviders: PROVIDERS, timeoutMs: 60000, searchMaxResults: 200, quotaRecord: true, quotaIntervalMinutes: 60, quotaHistoryDays: 180 })
-  assert.equal(plugins, 3, 'search login bridge, key pool and quota service mount together')
+  assert.equal(plugins, 4, 'search login bridge, key pool, quota service and image tools mount together')
   assert.deepEqual(hooks, [['internal/config', { global: true }]], 'the uniform source cap rides the loader config waterfall, not a tool shadow')
   assert.deepEqual(registered.map(provider => provider.id).sort(), [ROUTER_PROVIDER_ID, 'openai-codex', 'zai', 'google-zread'].sort())
   assert.ok(registered.every(provider => typeof provider.search === 'function' && typeof provider.available === 'function'))

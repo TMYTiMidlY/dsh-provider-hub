@@ -2,8 +2,10 @@
 
 [![CI](https://github.com/TMYTiMidlY/dsh-provider-hub/actions/workflows/ci.yml/badge.svg)](https://github.com/TMYTiMidlY/dsh-provider-hub/actions/workflows/ci.yml)
 
-一个独立的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 插件，**始终保留官方搜索，再为所有已有 `web_search` 附加 Codex / Z.AI 搜索增强**，并在 Web Models 页面提供 ChatGPT/Codex OAuth 登录入口与 **多 Provider 账号额度查询 / 小时记录 / 多 Key 池**。
+一个独立的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 插件，**始终保留官方搜索，再为所有已有 `web_search` 附加 Codex / Z.AI 搜索增强**，在 Web Models 页面提供 ChatGPT/Codex OAuth 登录入口与 **多 Provider 账号额度查询 / 小时记录 / 多 Key 池**，并提供可勾选的 **Codex / Z.AI 生图工具**。
 
+> `0.6.0` 在 `0.5.x` 之上把生图能力并入同一 Host entry：三个全局工具（`image_generate_codex`、`image_generate_zai`、`image_generate_zai_cn`）与包详情页里的"生图工具"三选开关。输入只有 `prompt` 与**比例提示** `aspectRatio`——实测该订阅端点把分辨率归一化到固定像素预算、忽略 `quality`，因此这两个参数不再暴露；比例被内容改写时结果中会出现软警告但图片照常返回。搜索、登录、额度与 Key 池行为与 `0.5.x` 一致。
+>
 > `0.5.0` 保留官方工具、现有 preset、原生调用栏和 `web_fetch`，不新增 Agent 模式或专属结果渲染器。默认每条查询调用 **官方 + Codex**；Z.AI 可独立附加。两个开关只控制增强，不能关掉官方基线。只有 ChatGPT/Codex 有 OAuth 登录按钮，Z.AI 使用 DSH 官方 API Key 配置入口。模型页每个 provider 卡片展示各自的账号额度（窗口用量、重置时间、积分）与小时用量曲线；API Key 类 provider 额外提供 **Key 池**：存多把命名 Key、一键切换实际生效的那把，并按 Key 分别预览额度与历史。
 
 ## 官方基线与搜索增强
@@ -41,13 +43,13 @@
 
 ## 安装
 
-先在独立 `DSH_HOME` 验收，再安装到目标 Web profile。打包 `0.4.4` 使用新的目录，不覆盖之前的产物：
+先在独立 `DSH_HOME` 验收，再安装到目标 Web profile。打包 `0.6.0` 使用新的目录，不覆盖之前的产物：
 
 ```sh
 PACK_DIR="$(mktemp -d /tmp/dsh-provider-hub-pack.XXXXXX)"
 npm pack --pack-destination "${PACK_DIR:?}"
 # 在已安装 dsh 的主机上：
-npm_config_auto_install_peers=false dsh plugin --profile web add "${PACK_DIR:?}/dsh-provider-hub-0.4.4.tgz"
+npm_config_auto_install_peers=false dsh plugin --profile web add "${PACK_DIR:?}/dsh-provider-hub-0.6.0.tgz"
 ```
 
 从 `dsh-web-search` 0.3.x 升级：先 `dsh plugin --profile web remove dsh-web-search`，再按上面安装新包，并把 profile patch 中 `- id: dsh-web-search` 条目改名为 `dsh-provider-hub`（配置字段名不变，废弃的 `tool` 兼容字段可删除）。entry id 变更意味着旧配置不会自动迁移；额度三项缺省时使用默认值。
@@ -176,11 +178,52 @@ Models 页面中只有 `llm-pi-ai` 的 ChatGPT/Codex provider 行显示本插件
 - **历史按 Key 记录**：每把 Key 的用量曲线独立（账号标识为 `key-<sha256 前缀>`，不可逆），互不串线。
 - 移除池内 Key 会同时清掉它的凭据引用；当前生效的官方引用不受影响。
 
+## 生图工具
+
+打开 WebUI **插件管理器 → dsh-provider-hub 包详情页**。生图开关与搜索增强、额度记录共用一张配置卡，共同暂存，由一次 **保存** 提交：
+
+| 工具 | 凭据 | 默认 | 计费 |
+|---|---|---|---|
+| `image_generate_codex`（ChatGPT / Codex） | 复用 Models 页 ChatGPT/Codex OAuth | 开 | 取决于 ChatGPT 账号实际权限 |
+| `image_generate_zai`（Z.AI 国际版） | `zai` 的 `ZAI_API_KEY` | 关 | GLM-Image 标准生图 API，独立计费 |
+| `image_generate_zai_cn`（智谱国内版） | `zai-coding-cn` 的 `ZAI_CODING_CN_API_KEY` | 关 | 同上，国内标准 API |
+
+- **多选是备选，不是群发**：勾选多个只是让多个工具可用，模型一次调用只用其中一个；仅当你明确要求多个提供方的结果时才分别调用。全部关闭后不注册任何生图工具，也不回退到未选中的提供方。
+- Z.AI 生图**不在 Coding Plan 已承诺的搜索/视觉额度内**，是两条标准付费 API；国内 `1113`（余额不足）以 `IMAGE_QUOTA_UNAVAILABLE` 明确提示。开启前应确认账户余额或资源包。
+- 首版仅支持**文生图**，不支持参考图编辑；凭据按区域严格隔离，绝不交叉回退。Codex 过期 grant 由 pi-ai 在 DSH 凭据锁内自动刷新，与聊天共用同一份记录。
+
+### 实测参数语义（0.6.0 的设计依据）
+
+对该订阅端点做过两组对照实验，结论直接决定了工具参数的形状：
+
+- **分辨率与质量不可指定**：6 次真实生成的实际输出全部被归一化到约 **1.57 百万像素**（请求 2048x2048 与 1024x1024 的方形输出同为 1254x1254）；`quality` 对照实验（同 prompt，auto/low/medium/high 各 3 张，共 12 张）显示耗时、字节密度、信息熵、边缘能量的组间差异均在组内噪声内且不满足单调排序——**参数已被移除**，输入只保留 `aspectRatio`（`auto` / `1:1` / `3:2` / `2:3` / `16:9` / `9:16`）。
+- **比例只是提示**：请求的宽高比通常被采纳，也可能被内容改写（方形请求得到横幅）。工具在返回时解析实际尺寸（PNG IHDR / JPEG SOF 精确解析，WebP 用预览尺寸），**明显偏离（>25%）时在结果文本中加入软警告**——图片照常返回，仅提示模型向用户说明偏差。
+- `background: transparent` 是唯一结构化生效的参数（输出 PNG 实测带 alpha 通道），保留暴露。
+
+### 超时、取消与不可重试
+
+每次调用只发出**一次**生成请求：不自动重试、不换模型、不换提供方、不换 Key。超时或取消时远端可能已经生成并消耗额度，工具以 `IMAGE_TIMEOUT` / `IMAGE_ABORTED` 明确提示"远端结果未知，不要自动重试"。
+
+- 工具级超时默认 300 秒（`imageTimeoutMs`，上限 600 秒），Host 外层预算留有 10 秒安全余量，外层先超时的终态同样保留不可重试警示。
+- PTC 模式的 `run_code` 总预算包含审批与生图，默认 120 秒小于生图默认值；嵌套生图应设置足够的外层预算，但外层预算不会越过工具上限。
+- 下载失败（如 Z.AI 临时 URL 过期）同样提示可能已扣费，不自动重新生成。
+
+### 并发
+
+每次调用互相独立（各自配置快照、凭据锁内刷新、独立附件写入），工具声明为**并行安全**；实测第一方端点接受同账号同时生成（3 路并发墙钟 ≈ 最慢单张，无 429）。一次要多张时，同一轮的多个生图调用按宿主并行池（默认上限 10）同时执行，而不是排队串行；跨会话本就互不阻塞。早期版本的独占栅栏会把同轮多张串行化、排队调用还会预烧外层超时预算，已在 0.6.0 移除。
+
+### 结果交付
+
+- 生成结果保存为**两份附件**：规范化预览（`saveImage`，可能转码）与原始字节文件（`saveFile`，逐字节保留）。视觉路线同时收到图片块；纯文本路线只收到文件信息。需要把原图交给用户时由模型用原生 `present` 声明。
+- Z.AI 临时 URL 仅用于一次性下载原图：只允许第一方 HTTPS 域名（`bigmodel.cn` / `chatglm.cn` / `z.ai`），连接地址经公网校验并固定到该连接（拒绝回环/内网/链路本地等），不携带生成凭据、不跟随重定向。
+- 结构化错误码（`IMAGE_*`）随工具结果持久化，错误消息不包含 token、Key 或后端原始报文。
+
 ## 停用、卸载与旧模式迁移
 
 - **卸载或停用整个 bundle**并应用新的组合配置后，移除本包对原生 Web 的覆盖，默认回到官方 DeepSeek；用户另写的 profile/home/CLI 覆盖仍需检查。
 - **只停用 Host 插件，但保留 `web.searchProvider: dsh-provider-hub`**，会留下明确的 `WEB_PROVIDER_CONFIGURED_MISSING`，不会自动恢复。应停用整个 bundle，或同时改回 `deepseek-official`。
 - 提供方注册、设置订阅、页面和 scoped 样式随 Cordis fiber 回收；设置卡不销毁共享 `configForms` scope。
+- **关闭全部生图开关**（或把 `imageProviders` 置空）即撤销三个生图工具；执行中的调用保持启动时快照，完成后不再注册。生图能力与搜索/额度共用同一 entry，卸载整个包时一起回收。
 - 新安装不发布、插入或修改专用 Provider Hub preset。`dsh-provider-hub/tool` 只保留模块导入兼容桥，遵循官方 `queries[]` 契约；它不会注册或恢复 `provider-hub` preset id，**不能保证已移除该 id 的旧会话自动冷恢复（cold resume）**。旧的 `query` / `provider` 调用仍需迁移。
 - 升级前检查旧 `provider-hub` 会话和默认预设选择。仍允许原生预设选择的会话及默认设置，应在移除旧 id 前改回标准模式；**已有内容的会话可能被原生选择器锁定，不能假定可以直接切换模式**。此时应先备份，再针对会话 projection identity 制定并验证迁移，或暂时保留可解析的旧预设兼容配置；本插件不自动执行这些迁移。移除该 id 后，`agentPresets.resolve('provider-hub')` 会因预设不存在而失败，仅保留工具模块不足以恢复。确认没有此 id 的会话且默认选择已是原生模式时，无需迁移会话。
 
@@ -204,6 +247,8 @@ DSH_HOME=/absolute/path/to/isolated-home dsh web --no-open --port 3981
 ## 安全与兼容边界
 
 - 搜索结果是外部、不可信内容；不执行结果中的指令。
+- 生图工具的错误消息与结构化 `IMAGE_*` 代码不包含 token、API Key、后端原始报文或内部 cause。
+- 生图 endpoint 固定为第一方地址（`chatgpt.com`、`api.z.ai`、`open.bigmodel.cn`）；ZAI 结果 URL 下载仅允许第一方 HTTPS 域名，连接前校验解析地址为公网地址并固定到该连接，拒绝重定向，代理/内网劫持场景 fail closed。
 - Codex、Z.AI endpoint 固定为第一方地址，组合失败提示仅公开后端 id 与错误代码。
 - Remote bridge 不返回 access token/API key，只返回 flow 状态、通知和 prompt。
 - Key 池的秘密只写进官方凭据库引用（`KEY_POOL_*`，0600）；插件元数据文件与 remote 桥都只暴露名字、ID 与状态，不含 Key 值。切换生效 Key 只改写 provider 的官方引用。
