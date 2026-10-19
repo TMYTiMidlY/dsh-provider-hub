@@ -31,7 +31,7 @@ test('package pins a private volatile-capable Schema builder without bundling du
 })
 
 test('the native settings schema exposes every hub UI field for live saves', () => {
-  for (const field of ['searchProviders', 'imageProviders', 'imageTimeoutMs', 'quotaRecord', 'quotaIntervalMinutes', 'quotaHistoryDays']) {
+  for (const field of ['searchProviders', 'imageProviders', 'imageTimeoutMs', 'quotaRecord', 'quotaIntervalMinutes', 'quotaHistoryDays', 'zaiTeamOrganization', 'zaiTeamProject']) {
     assert.equal(Config.dict[field].meta.volatile, true, `${field} must be editable via configForms`)
   }
   assert.equal(Config.dict.quotaRecord.meta.default, true)
@@ -70,7 +70,7 @@ test('Typert metadata declares every endpoint the browser mounts, host and remot
   }
   const endpoints = host.invocations.map(item => `${item.namespace}/${item.method}`)
   assert.equal(new Set(endpoints).size, endpoints.length, 'no endpoint is declared twice')
-  for (const namespace of ['searchLogin', 'quota', 'keyPool']) {
+  for (const namespace of ['searchLogin', 'quota', 'keyPool', 'codexAccounts']) {
     assert.ok(endpoints.some(endpoint => endpoint.startsWith(`${namespace}/`)), `${namespace} endpoints stay mounted`)
   }
 })
@@ -85,17 +85,17 @@ test('client stages independent OpenAI/ZAI switches and only Codex OAuth without
   let formDisposed = false
   let watchDisposed = false
   const effects = []
-  const state = { writable: true, saving: false, dirty: false, searchProviders: { text: '["openai-codex"]', overridden: false, invalid: false }, imageProviders: { text: '["openai-codex"]', overridden: false, invalid: false }, searchMaxResults: { text: '200', overridden: false, invalid: false }, quotaRecord: { text: 'true', overridden: false, invalid: false }, quotaIntervalMinutes: { text: '60', overridden: false, invalid: false }, quotaHistoryDays: { text: '180', overridden: false, invalid: false } }
+  const state = { writable: true, saving: false, dirty: false, searchProviders: { text: '["openai-codex"]', overridden: false, invalid: false }, imageProviders: { text: '["openai-codex"]', overridden: false, invalid: false }, searchMaxResults: { text: '200', overridden: false, invalid: false }, quotaRecord: { text: 'true', overridden: false, invalid: false }, quotaIntervalMinutes: { text: '60', overridden: false, invalid: false }, quotaHistoryDays: { text: '180', overridden: false, invalid: false }, zaiTeamOrganization: { text: '', overridden: false, invalid: false }, zaiTeamProject: { text: '', overridden: false, invalid: false } }
   const scope = {
-    getSnapshot: () => ({ state: 'served', fields: { searchProviders: { value: ['openai-codex'] }, imageProviders: { value: ['openai-codex'] }, searchMaxResults: { value: 200 }, quotaRecord: { value: true }, quotaIntervalMinutes: { value: 60 }, quotaHistoryDays: { value: 180 } } }),
+    getSnapshot: () => ({ state: 'served', fields: { searchProviders: { value: ['openai-codex'] }, imageProviders: { value: ['openai-codex'] }, searchMaxResults: { value: 200 }, quotaRecord: { value: true }, quotaIntervalMinutes: { value: 60 }, quotaHistoryDays: { value: 180 }, zaiTeamOrganization: { value: '' }, zaiTeamProject: { value: '' } } }),
     subscribe: () => () => {},
-    mutate: async callback => { saved++; savedValue = callback({ searchProviders: ['openai-codex'], imageProviders: ['openai-codex'], searchMaxResults: 200, quotaRecord: true, quotaIntervalMinutes: 60, quotaHistoryDays: 180 }); return savedValue },
+    mutate: async callback => { saved++; savedValue = callback({ searchProviders: ['openai-codex'], imageProviders: ['openai-codex'], searchMaxResults: 200, quotaRecord: true, quotaIntervalMinutes: 60, quotaHistoryDays: 180, zaiTeamOrganization: '', zaiTeamProject: '' }); return savedValue },
     dispose: () => { throw new Error('shared configForms scope must not be disposed by client') },
   }
   class SettingsFormModel {
     constructor(received, fields) {
       assert.equal(received, scope)
-      assert.equal(fields.length, 6)
+      assert.equal(fields.length, 8)
       assert.equal(fields[0].field, 'searchProviders')
       assert.equal(fields[0].format(['openai-codex', 'zai']), '["openai-codex","zai"]')
       assert.equal(JSON.stringify(fields[0].parse('[]').value), '[]')
@@ -110,7 +110,7 @@ test('client stages independent OpenAI/ZAI switches and only Codex OAuth without
       assert.equal(JSON.stringify(fields[1].parse('[]').value), '[]', 'explicit all-off stays off')
       assert.equal(fields[1].parse('["zai-coding-cn"]'), undefined, 'credential-source ids are not image tools')
       assert.equal(fields[1].parse('["deepseek-official"]'), undefined)
-      assert.equal(JSON.stringify(fields.slice(2).map(field => field.field)), JSON.stringify(['searchMaxResults', 'quotaRecord', 'quotaIntervalMinutes', 'quotaHistoryDays']))
+      assert.equal(JSON.stringify(fields.slice(2).map(field => field.field)), JSON.stringify(['searchMaxResults', 'quotaRecord', 'quotaIntervalMinutes', 'quotaHistoryDays', 'zaiTeamOrganization', 'zaiTeamProject']))
       assert.equal(fields[2].format(200), '200')
       assert.equal(fields[2].format('nonsense'), '200')
       assert.equal(JSON.stringify(fields[2].parse('45')), JSON.stringify({ kind: 'set', value: 45 }))
@@ -126,6 +126,12 @@ test('client stages independent OpenAI/ZAI switches and only Codex OAuth without
       assert.equal(JSON.stringify(fields[4].parse('45')), JSON.stringify({ kind: 'set', value: 45 }))
       assert.equal(fields[4].parse('5'), undefined, 'interval below schema minimum is staged as invalid')
       assert.equal(fields[5].parse('999999'), undefined)
+      assert.equal(fields[6].format(undefined), '')
+      assert.equal(fields[6].format('org-123'), 'org-123')
+      assert.equal(JSON.stringify(fields[6].parse('  org-123  ')), JSON.stringify({ kind: 'set', value: 'org-123' }), 'team ids stage trimmed')
+      assert.equal(JSON.stringify(fields[6].parse('')), JSON.stringify({ kind: 'clear' }), 'an empty team field clears the override')
+      assert.equal(fields[7].field, 'zaiTeamProject')
+      assert.equal(JSON.stringify(fields[7].parse('proj-9')), JSON.stringify({ kind: 'set', value: 'proj-9' }), 'the project field stages like the organization field')
       this.fields = fields
     }
     bind(project) { return { getSnapshot: project, subscribe: () => () => {} } }
@@ -134,7 +140,7 @@ test('client stages independent OpenAI/ZAI switches and only Codex OAuth without
     actions() { return {
       edit: (name, value) => { state[name] = { ...state[name], text: value }; state.dirty = true },
       resetField: name => { state[name] = { ...state[name], text: name === 'imageProviders' ? '["openai-codex"]' : '["openai-codex"]' } },
-      save: () => scope.mutate(value => ({ ...value, searchProviders: this.fields[0].parse(state.searchProviders.text).value, imageProviders: this.fields[1].parse(state.imageProviders.text).value, searchMaxResults: this.fields[2].parse(state.searchMaxResults.text).value, quotaRecord: this.fields[3].parse(state.quotaRecord.text).value, quotaIntervalMinutes: this.fields[4].parse(state.quotaIntervalMinutes.text).value, quotaHistoryDays: this.fields[5].parse(state.quotaHistoryDays.text).value })),
+      save: () => scope.mutate(value => ({ ...value, searchProviders: this.fields[0].parse(state.searchProviders.text).value, imageProviders: this.fields[1].parse(state.imageProviders.text).value, searchMaxResults: this.fields[2].parse(state.searchMaxResults.text).value, quotaRecord: this.fields[3].parse(state.quotaRecord.text).value, quotaIntervalMinutes: this.fields[4].parse(state.quotaIntervalMinutes.text).value, quotaHistoryDays: this.fields[5].parse(state.quotaHistoryDays.text).value, zaiTeamOrganization: this.fields[6].parse(state.zaiTeamOrganization.text).kind === 'clear' ? undefined : this.fields[6].parse(state.zaiTeamOrganization.text).value, zaiTeamProject: this.fields[7].parse(state.zaiTeamProject.text).kind === 'clear' ? undefined : this.fields[7].parse(state.zaiTeamProject.text).value })),
       discard: () => { state.dirty = false },
     } }
     dispose() { formDisposed = true }
@@ -228,6 +234,7 @@ test('client stages independent OpenAI/ZAI switches and only Codex OAuth without
     assert.ok(!rows.some(node => node.props['data-search-provider'] === 'deepseek-official'))
     assert.ok(nodes.some(node => node.type === 'legend' && node.props.children.includes('附加搜索增强')))
     assert.ok(nodes.some(node => node.type === 'legend' && node.props.children.includes('Codex 额度记录')), 'quota settings live in the same card as search settings')
+    assert.ok(nodes.some(node => node.type === 'legend' && node.props.children.includes('Z.AI 团队版额度查询')), 'the zai team fields get their own group')
     const openaiSwitch = nodes.find(node => node.type === Switch && node.props.label === '启用 ChatGPT / Codex 搜索增强')
     const zaiSwitch = nodes.find(node => node.type === Switch && node.props.label === '启用 Z.AI 搜索增强')
     const recordSwitch = nodes.find(node => node.type === Switch && node.props.label === '启用每小时额度记录')
@@ -235,6 +242,8 @@ test('client stages independent OpenAI/ZAI switches and only Codex OAuth without
     const fields = id => nodes.find(node => node.type === SettingsValueField && node.props.id === id)
     assert.equal(fields('provider-hub-quota-interval').props.text, '60')
     assert.equal(fields('provider-hub-quota-retention').props.text, '180')
+    assert.equal(fields('provider-hub-zai-team-org').props.text, '', 'the team organization field renders with its staged text')
+    assert.equal(fields('provider-hub-zai-team-project').props.text, '')
     const limitField = fields('provider-hub-result-limit')
     assert.equal(limitField.props.text, '200', 'uniform source cap is editable in the same card')
     assert.equal(limitField.props.numeric, true)
@@ -280,7 +289,7 @@ test('Host mounts native providers without shadowing any preset tool or prompt',
     tools: { register: () => { throw new Error('Host must not register tools') } },
     systemPrompt: { section: () => { throw new Error('Host must not change preset prompts') } },
   }, { searchProviders: [], enabledProviders: PROVIDERS, timeoutMs: 60000, searchMaxResults: 200, quotaRecord: true, quotaIntervalMinutes: 60, quotaHistoryDays: 180 })
-  assert.equal(plugins, 4, 'search login bridge, key pool, quota service and image tools mount together')
+  assert.equal(plugins, 5, 'search login bridge, key pool, codex accounts, quota service and image tools mount together')
   assert.deepEqual(hooks, [['internal/config', { global: true }]], 'the uniform source cap rides the loader config waterfall, not a tool shadow')
   assert.deepEqual(registered.map(provider => provider.id).sort(), [ROUTER_PROVIDER_ID, 'openai-codex', 'zai', 'google-zread'].sort())
   assert.ok(registered.every(provider => typeof provider.search === 'function' && typeof provider.available === 'function'))

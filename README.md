@@ -2,7 +2,9 @@
 
 [![CI](https://github.com/TMYTiMidlY/dsh-provider-hub/actions/workflows/ci.yml/badge.svg)](https://github.com/TMYTiMidlY/dsh-provider-hub/actions/workflows/ci.yml)
 
-一个独立的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 插件，**始终保留官方搜索，再为所有已有 `web_search` 附加 Codex / Z.AI 搜索增强**，在 Web Models 页面提供 ChatGPT/Codex OAuth 登录入口与 **多 Provider 账号额度查询 / 小时记录 / 多 Key 池**，并提供可勾选的 **Codex / Z.AI 生图工具**。
+一个独立的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 插件，**始终保留官方搜索，再为所有已有 `web_search` 附加 Codex / Z.AI 搜索增强**，在 Web Models 页面提供 ChatGPT/Codex OAuth 登录入口与 **多 Provider 账号额度查询 / 小时记录 / 多 Key 池 / Codex 账号池与 CLI 登录态导入**，并提供可勾选的 **Codex / Z.AI 生图工具**。
+
+> `0.6.1` 聚焦额度体验第二轮：额度与 Key 池改**原生折叠块**（默认收起，展开才发探测请求）；用量曲线固定 **0–100% 纵轴**并支持 **hover 查看每个时段的消耗与计划**、订阅变化画分隔线；Codex 历史改按**登录邮箱**记录（旧账号 UUID 点自动并入同一曲线）；Key 池与 Codex 账号池改**下拉选择 + 重命名**；新增 **Codex 账号池**——从 Codex CLI 目录（全局 `~/.codex` 或 cc-switch 的 codex-gth）导入登录态作为 openai-codex 的第二种登录方式，可随时切换当前账号；设置卡新增 **Z.AI 团队版组织/项目 ID** 两个文本字段。
 
 > `0.6.0` 在 `0.5.x` 之上把生图能力并入同一 Host entry：三个全局工具（`image_generate_codex`、`image_generate_zai`、`image_generate_zai_cn`）与包详情页里的"生图工具"三选开关。输入只有 `prompt` 与**比例提示** `aspectRatio`——实测该订阅端点把分辨率归一化到固定像素预算、忽略 `quality`，因此这两个参数不再暴露；比例被内容改写时结果中会出现软警告但图片照常返回。搜索、登录、额度与 Key 池行为与 `0.5.x` 一致。
 >
@@ -102,7 +104,7 @@ npm_config_auto_install_peers=false dsh plugin --profile web add "${PACK_DIR:?}/
 
 `searchProviders`、`timeoutMs` 和遗留 reader 的 `zreadEndpoint` 是实时 Config 字段。`enabledProviders` 是普通部署 allowlist，不是用户的增强开关，改变它遵循 Loader 重载生命周期。应保留 `deepseek-official` 基线；运维禁用或缺凭据会公开相应失败，不会伪装成功或调用未选中的增强。覆盖整项 `config` 时应保留仍需使用的字段。
 
-`quotaRecord`、`quotaIntervalMinutes`（15–1440，默认 60）和 `quotaHistoryDays`（7–3650，默认 180）同样使用原生实时 Config 字段，经同一个 configForms 表单保存，控制所有 provider 的额度记录：DSH 运行期间每间隔分钟在后台只读查询一次各额度接口并落盘；历史点保存在 `$DSH_HOME/dsh-provider-hub/quota-history.jsonl`（0600，按 provider/账号标记，超期整理删除）。`zaiTeamOrganization` / `zaiTeamProject`（均为实时字符串字段）填写 BigModel 团队的组织与项目 ID，供团队版 key 的 `type=2` 额度查询使用；留空时只查个人 scope，团队 key 会在面板里得到明确的补配置提示。
+`quotaRecord`、`quotaIntervalMinutes`（15–1440，默认 60）和 `quotaHistoryDays`（7–3650，默认 180）同样使用原生实时 Config 字段，经同一个 configForms 表单保存，控制所有 provider 的额度记录：DSH 运行期间每间隔分钟在后台只读查询一次各额度接口并落盘；历史点保存在 `$DSH_HOME/dsh-provider-hub/quota-history.jsonl`（0600，按 provider/账号标记，超期整理删除）。`zaiTeamOrganization` / `zaiTeamProject`（均为实时字符串字段，0.6.1 起在设置卡的「Z.AI 团队版额度查询」组里直接填写）填 BigModel 团队的组织与项目 ID，供团队版 key 的 `type=2` 额度查询使用；留空时只查个人 scope，团队 key 会在面板里得到明确的补配置提示。
 
 ### 运维覆盖
 
@@ -145,7 +147,9 @@ Models 页面中只有 `llm-pi-ai` 的 ChatGPT/Codex provider 行显示本插件
 
 ### 账号额度展示与记录
 
-模型页每个 provider 卡片都有各自的 **账号额度** 区：Codex 在登录卡下方（邮箱、计划、窗口用量进度条、重置倒计时、积分余额与可重置次数，每张可重置额度单独列出标题与**到期日期**）；API Key 类 provider（`zai`、`zai-coding-cn`、`kimi-coding`、`xiaomi-token-plan-cn`）直接在卡片内展示当前生效 Key 的额度，并按 Key 分别提供 24 小时 / 7 天 / 30 天用量曲线（纵轴按数据范围自动缩放并留边距、两端标注首尾数值，横轴带时间刻度），面板打开期间每 60 秒自动重读历史，无需手动刷新。
+模型页每个 provider 卡片的额度区都在一个**原生折叠块**里（`<details>`，默认收起）：**首次展开才挂载面板并发起额度探测**，收起只是视觉收起，后台记录循环不受影响。Codex 的折叠块同时容纳账号额度与 **Codex 账号池**；API Key 类 provider（`zai`、`zai-coding-cn`、`kimi-coding`、`xiaomi-token-plan-cn`）的折叠块容纳当前生效 Key 的额度与 **Key 池**（邮箱、计划、窗口用量进度条、重置倒计时、积分余额与可重置次数，每张可重置额度单独列出标题与**到期日期**）。
+
+每个额度面板提供 24 小时 / 7 天 / 30 天用量曲线：**纵轴固定 0–100%**（用量百分比对整个窗口有意义，不做逐曲线自适应缩放）、两端标注首尾数值、横轴带时间刻度；**hover（或键盘/触控的原生 `<title>` 兜底）显示该时段的时间、已用百分比与计划**；相邻记录点计划变化时画竖直虚线分隔并标注 `订阅变化：旧 → 新`。面板打开期间每 60 秒自动重读历史（本地读盘），无需手动刷新。Codex 的历史按**登录邮箱**标记账号，换账号 UUID 拼写不会断曲线；API Key 类按 Key 哈希分别记录。
 
 额度查询全部是**只读**第一方接口，凭据只读不刷新、不记录、不返回浏览器：
 
@@ -153,16 +157,16 @@ Models 页面中只有 `llm-pi-ai` 的 ChatGPT/Codex provider 行显示本插件
 |---|---|---|
 | `openai-codex` | `GET https://chatgpt.com/backend-api/wham/usage` | 与 Codex CLI `/status` 同源；重置额度明细走 `GET /wham/rate-limit-reset-credits`（有可用额度时附加读取，失败不影响主视图） |
 | `zai` | `GET https://api.z.ai/api/monitor/usage/quota/limit` | 个人版 GLM Coding Plan：5 小时 / 周 token 窗口 + 每月工具调用（含 search-prime / web-reader / zread 明细） |
-| `zai-coding-cn` | `GET https://open.bigmodel.cn/api/monitor/usage/quota/limit` | 同上；**团队版 key** 需 `?type=2` 并携带 `Bigmodel-Organization` / `Bigmodel-Project` 头，在 profile 配置 `zaiTeamOrganization` / `zaiTeamProject` 后自动走团队 scope，缺配置时面板明确提示去哪补 |
-| `kimi-coding` | `GET https://api.kimi.com/coding/v1/usages` | Kimi For Coding：5 小时 / 7 天用量池（ratio pools 优先，兼容旧计数响应） |
-| `xiaomi-token-plan-cn` | — | Xiaomi Token Plan 暂无官方额度 API（MiMo-Code #2495 仍未实现），面板如实提示并给出控制台链接，不伪造数值、不记录历史 |
+| `zai-coding-cn` | `GET https://open.bigmodel.cn/api/monitor/usage/quota/limit` | 同上；**团队版 key** 需 `?type=2` 并携带 `Bigmodel-Organization` / `Bigmodel-Project` 头，在设置卡或 profile 配置 `zaiTeamOrganization` / `zaiTeamProject` 后自动走团队 scope，缺配置时面板明确提示去哪补 |
+| `kimi-coding` | `GET https://api.kimi.com/coding/v1/usages` | Kimi For Coding：5 小时 / 7 天用量池（ratio pools 优先，兼容旧计数响应）；响应可能不带会员/plan 字段，此时不显示计划标签，解析器已兼容 |
+| `xiaomi-token-plan-cn` | — | Xiaomi Token Plan 暂无官方额度 API（MiMo-Code #2495 仍未实现），面板如实提示并给出控制台链接，不伪造数值、不记录历史。属已知限制：后续官方提供接口后接入即可 |
 
 查询触发时机（每个 provider、每把 Key 各自缓存与记录）：
 
 | 触发 | 行为 |
 |---|---|
 | 后台定时 | DSH 运行期间每 `quotaIntervalMinutes`（默认 60）对当前生效 Key 与 Key 池中每把 Key 各查询一次并记录历史；页面关闭不影响 |
-| 打开额度区 | 缓存 5 分钟内直接复用，超过才发起一次真实查询 |
+| 展开折叠块 | 首次展开挂载面板并发起查询；缓存 5 分钟内直接复用，超过才发真实请求。收起不再触发任何请求 |
 | 面板打开期间 | 每 60 秒自动重读用量历史（本地读盘，不发上游请求），曲线随记录点持续更新 |
 | 点击刷新 | 立即查询；同一 provider/Key 60 秒内重复点击会节流返回缓存 |
 | 换号或切 Key 后 | 检测到账号（API Key 为稳定哈希 `key-…`）变化时绕过节流立即查询 |
@@ -171,12 +175,22 @@ Models 页面中只有 `llm-pi-ai` 的 ChatGPT/Codex provider 行显示本插件
 
 ### Key 池（多 API Key 管理）
 
-模型页 API Key 类 provider 卡片内有 **Key 池**：为一个 provider 存放多把命名 API Key（名字 + 短 ID），随时把其中一把设为**当前生效**，并可展开每把 Key 的额度与历史（统一预览所有 Key 的额度信息）。
+模型页 API Key 类 provider 卡片的折叠块内有 **Key 池**：为一个 provider 存放多把命名 API Key（名字 + 短 ID），随时把其中一把设为**当前生效**，并可展开每把 Key 的额度与历史（统一预览所有 Key 的额度信息）。池以**下拉框**呈现（当前生效的 Key 带「（当前生效）」标注），选中后可 **设为当前 / 查看额度详情 / 重命名 / 删除**；重命名是内联表单（保存/取消），添加表单保留在底部。
 
 - **秘密只进官方凭据库**：每把池内 Key 以 `KEY_POOL_<PROVIDER>_<ID>` 引用写入 `$DSH_HOME/.credentials.yaml`（0600），由 `dsh-credentials` 的 `set/unset` 写接口（模型页编辑器同一入口）维护；插件自己的 `key-pool.json`（0600）只保存名字、ID、provider 与引用名，**不含任何秘密**，remote 桥也从不返回 Key 值。
 - **切换 = 改写官方引用**：设为当前会把该 Key 的值写入 provider 的官方引用（`KIMI_API_KEY` / `ZAI_API_KEY` / `ZAI_CODING_CN_API_KEY` / `XIAOMI_TOKEN_PLAN_CN_API_KEY`），对话、搜索增强与额度查询在下一次操作立即使用新凭据，无需重启或改配置。当前生效以“值与官方引用一致”判定，从模型页编辑器改过 Key 也不会标错。
 - **历史按 Key 记录**：每把 Key 的用量曲线独立（账号标识为 `key-<sha256 前缀>`，不可逆），互不串线。
 - 移除池内 Key 会同时清掉它的凭据引用；当前生效的官方引用不受影响。
+
+### Codex 账号池与 CLI 登录态导入
+
+Codex 登录卡提供 openai-codex 的**第二种登录方式**：把 Codex CLI 已有的登录态直接搬进来，不点浏览器 OAuth。适用于机器上已用 `codex login` 登录过、或用 cc-switch 管理多个 CLI 目录（如全局 `codex` 与 `codex-gth`）的场景。
+
+- **导入源是目录选择**：导入表单列出本机的 Codex CLI 目录（全局 `~/.codex/auth.json` 与 cc-switch 启动目录里的 codex-gth），各自的邮箱与 token 到期时间直接预览；目录缺失或未登录会标注「暂无可用登录态」。导入时可命名（留空默认用邮箱）。
+- **账号池即凭据记录**：每个命名账号是一条 `dsh-provider-hub/codex-account-<8hex>` 凭据记录（kind grant，payload 内带名字/来源/导入时间），secret 只进 `$DSH_HOME/.credentials.yaml`，remote 桥只返回名字、ID、邮箱前缀与到期事实，**从不返回 token**。
+- **切换 = 官方写路径**：设为当前会先把现用官方 grant 按「token 更新鲜者胜」回写进它自己的池槽（避免切走即丢新 token），再经 `modifyRecord` 把所选 grant 写入官方 `llm-pi-ai/openai-codex` 记录——对话、搜索与额度在下一次操作立即使用新账号，无需重启。同一账号重复导入/切换时保留 `expires` 更晚的一组 token。
+- **每账号额度预览**：账号池里任一账号可展开独立的额度面板（按该 grant 查询，token 过期会如实显示过期态）。Codex 用量历史绑定登录邮箱，切换账号各自成线。
+- 注意：CLI 与 DSH 使用同一 OAuth client，两边各自刷新会轮换 refresh token（先刷新的一边使另一边的 refresh 失效）；切换语义下可接受——被踢的一边重新导入/登录即可。
 
 ## 生图工具
 

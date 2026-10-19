@@ -55,8 +55,8 @@ const imageIds = ['openai-codex', 'zai', 'zai-cn']
 // The merged entry owns one combined form; every field below is writable
 // through the same namespace, so a save must touch only the drafted fields.
 const NAMESPACE = 'dsh-provider-hub'
-const FIELDS = ['searchProviders', 'imageProviders', 'searchMaxResults', 'quotaRecord', 'quotaIntervalMinutes', 'quotaHistoryDays']
-const DEFAULTS = { searchProviders: ['openai-codex'], imageProviders: ['openai-codex'], searchMaxResults: 200, quotaRecord: true, quotaIntervalMinutes: 60, quotaHistoryDays: 180 }
+const FIELDS = ['searchProviders', 'imageProviders', 'searchMaxResults', 'quotaRecord', 'quotaIntervalMinutes', 'quotaHistoryDays', 'zaiTeamOrganization', 'zaiTeamProject']
+const DEFAULTS = { searchProviders: ['openai-codex'], imageProviders: ['openai-codex'], searchMaxResults: 200, quotaRecord: true, quotaIntervalMinutes: 60, quotaHistoryDays: 180, zaiTeamOrganization: '', zaiTeamProject: '' }
 
 function nodesOf(tree) {
   const result = []
@@ -220,7 +220,7 @@ const switchImage = (fixture, target) => {
 
 test('merged real Host model stages the combined form and an image-only edit persists only imageProviders', async t => {
   const fixture = await withClient(t)
-  assert.deepEqual(fixture.specs[0], ["searchProviders", "imageProviders", 'searchMaxResults', 'quotaRecord', 'quotaIntervalMinutes', 'quotaHistoryDays'], 'one model owns the combined field order')
+  assert.deepEqual(fixture.specs[0], ["searchProviders", "imageProviders", 'searchMaxResults', 'quotaRecord', 'quotaIntervalMinutes', 'quotaHistoryDays', 'zaiTeamOrganization', 'zaiTeamProject'], 'one model owns the combined field order')
   assert.equal(fixture.models.length, 1, 'exactly one staged model for the package page')
   switchImage(fixture, ['openai-codex', 'zai'])
   let rendered = fixture.render()

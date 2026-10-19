@@ -8,6 +8,7 @@ import { QuotaFormatError, QuotaHistory, QuotaService, identityFromToken, parseQ
 const b64url = value => Buffer.from(JSON.stringify(value)).toString('base64url')
 const syntheticToken = (claims = {}) => `synthetic-header.${b64url(claims)}.synthetic-signature`
 const profileToken = syntheticToken({ 'https://api.openai.com/profile': { email: 'quota@example.test' }, 'https://api.openai.com/auth': { chatgpt_plan_type: 'pro' } })
+const otherToken = syntheticToken({ 'https://api.openai.com/profile': { email: 'other@example.test' }, 'https://api.openai.com/auth': { chatgpt_plan_type: 'plus' } })
 const grant = (payload = {}) => ({ kind: 'grant', payload: { type: 'oauth', access: profileToken, accountId: 'acct-1', expires: Date.now() + 3_600_000, ...payload } })
 
 const liveFixture = () => ({
@@ -121,6 +122,8 @@ test('QuotaHistory appends, filters by provider/account and dedupes per hour', a
     assert.deepEqual(points, [{ ts: 2000, used: { weekly: 12 }, credits: 60000 }, { ts: 5000, used: { weekly: 14 }, credits: 61000 }])
     assert.deepEqual(await history.read('openai-codex', 'acct-1', 2500), [{ ts: 5000, used: { weekly: 14 }, credits: 61000 }])
     assert.deepEqual(await history.read('openai-codex', 'acct-none', 0), [])
+    // An account whose stable id changed reads both spellings as one curve.
+    assert.deepEqual(await history.read('openai-codex', ['quota@example.test', 'acct-1'], 0), points)
     assert.deepEqual(await history.read('zai-coding-cn', 'key-deadbeef', 0), [{ ts: 5000, used: { short: 3 } }])
     assert.deepEqual(await history.read('kimi-coding', 'key-deadbeef', 0), [], 'one provider never leaks another provider’s points')
   } finally {
@@ -151,7 +154,7 @@ test('snapshot serves a normalized view without leaking the access token', async
   const result = await svc.snapshot({})
   assert.equal(result.status, 'ok')
   assert.equal(result.snapshot.email, 'quota@example.test')
-  assert.equal(result.snapshot.account, 'acct-1')
+  assert.equal(result.snapshot.account, 'quota@example.test', 'history binds to the login email')
   assert.deepEqual(result.snapshot.windows, [{ kind: 'weekly', usedPercent: 15, windowSeconds: 604800, resetAt: 1792295880 }])
   assert.equal(result.snapshot.credits.balance, 62500)
   assert.doesNotMatch(JSON.stringify(result), /synthetic-header|synthetic-signature/u)
@@ -216,14 +219,14 @@ test('manual refresh is clamped to one upstream call per minute per account', as
 test('switching accounts bypasses the spacing clamp', async () => {
   const fetch = countingFetch()
   let now = 1_000_000_000_000
-  let accountId = 'acct-1'
-  const svc = service({ readRecord: async () => grant({ accountId }), fetchImpl: fetch.fetch, now: () => now })
+  let record = grant()
+  const svc = service({ readRecord: async () => record, fetchImpl: fetch.fetch, now: () => now })
   await svc.snapshot({ maxAgeMs: 0 })
-  accountId = 'acct-2'
+  record = grant({ access: otherToken, accountId: 'acct-2' })
   now += 10_000
   const switched = await svc.snapshot({ maxAgeMs: 0 })
   assert.equal(switched.status, 'ok')
-  assert.equal(switched.snapshot.account, 'acct-2')
+  assert.equal(switched.snapshot.account, 'other@example.test')
   assert.equal(fetch.calls, 2)
 })
 
@@ -268,9 +271,10 @@ test('the recorder appends history points and honours the quotaRecord switch', a
     assert.equal(text.trim().split('\n').length, 1, 'only credentials that actually resolve record a point')
     const point = JSON.parse(text.trim())
     assert.equal(point.provider, 'openai-codex')
-    assert.equal(point.account, 'acct-1')
+    assert.equal(point.account, 'quota@example.test')
     assert.deepEqual(point.used, { weekly: 15 })
     assert.equal(point.credits, 62500)
+    assert.equal(point.plan, 'pro', 'the recorder keeps the plan so the curve can mark changes')
     const off = service({ fetchImpl: async () => jsonResponse(liveFixture()), history, config: { quotaRecord: false } })
     assert.equal(await off.record(), 'disabled')
     const offText = await readFile(join(dir, 'quota-history.jsonl'), 'utf8')
@@ -285,14 +289,35 @@ test('history RPC filters to the current account within the requested window', a
   try {
     let now = 1_000_000_000_000
     const history = new QuotaHistory(join(dir, 'quota-history.jsonl'), { now: () => now })
-    await history.append({ ts: Math.floor(now / 1000) - 7200, account: 'acct-1', used: { weekly: 5 } })
-    await history.append({ ts: Math.floor(now / 1000) - 3600, account: 'acct-1', used: { weekly: 6 } })
+    await history.append({ ts: Math.floor(now / 1000) - 7200, account: 'quota@example.test', used: { weekly: 5 } })
+    await history.append({ ts: Math.floor(now / 1000) - 3600, account: 'quota@example.test', used: { weekly: 6 } })
     await history.append({ ts: Math.floor(now / 1000) - 3600, account: 'acct-9', used: { weekly: 99 } })
     const svc = service({ history, now: () => now })
     const result = await svc.history({ hours: 24 })
     assert.equal(result.status, 'ok')
     assert.deepEqual(result.points.map(point => point.used.weekly), [5, 6])
+    // Points recorded under the legacy uuid spelling fold into the email curve.
+    await history.append({ ts: Math.floor(now / 1000) - 500, account: 'acct-1', used: { weekly: 7 } })
+    assert.deepEqual((await svc.history({ hours: 24 })).points.map(point => point.used.weekly), [5, 6, 7])
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
+})
+
+test('quota previews a pooled Codex account grant by id', async () => {
+  const fetch = countingFetch(() => ({ ...liveFixture(), email: 'pooled@example.test', plan_type: 'team' }))
+  let now = 1_000_000_000_000
+  const grantRecord = { kind: 'grant', payload: { type: 'oauth', access: profileToken, refresh: 'synthetic-refresh', expires: now + 3_600_000, accountId: 'acct-pool', name: 'vickie' } }
+  const svc = service({ fetchImpl: fetch.fetch, now: () => now })
+  svc.codexAccounts = {
+    grant: async id => (id === 'ab12cd34' ? grantRecord.payload : undefined),
+  }
+  const result = await svc.snapshot({ provider: 'openai-codex', grantId: 'ab12cd34' })
+  assert.equal(result.status, 'ok')
+  assert.equal(result.snapshot.account, 'quota@example.test')
+  assert.equal(result.snapshot.email, 'pooled@example.test')
+  assert.equal(fetch.calls, 1)
+  assert.equal((await svc.snapshot({ provider: 'openai-codex', grantId: 'ffff0000' })).status, 'signed-out', 'an unknown grant id is signed out, not an error')
+  grantRecord.payload.expires = now - 1
+  assert.equal((await svc.snapshot({ provider: 'openai-codex', grantId: 'ab12cd34', maxAgeMs: 0 })).status, 'expired', 'an expired pooled grant reports the expired state')
 })

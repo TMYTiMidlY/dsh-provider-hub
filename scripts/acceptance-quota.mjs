@@ -138,12 +138,19 @@ const flatten = node => {
 for (const provider of QUOTA_PROVIDERS) {
   const tree = flatten(cardFactory({ provider: { provider: provider.id }, keyConfigured: true, pool: poolRemote, quota: quotaRemote }))
   const section = tree.find(node => node.props?.['data-provider-hub-quota'])
+  // Since 0.6.1 the quota area lives behind a native fold, collapsed by
+  // default: the card must render the fold (not the panel) until expanded.
+  // Deep expand/interaction coverage lives in test/quota-panel.test.js.
+  const fold = tree.find(node => node.props?.['data-fold'] === 'true')
   const panels = tree.filter(node => node.props?.['data-quota-section'])
-  const rows = tree.filter(node => node.props?.['data-pool-entry'])
+  const rows = tree.filter(node => node.props?.['data-pool-entry'] || node.props?.['data-pool-option'])
   if (!section && provider.id !== 'openai-codex') throw new Error(`render FAIL: no card for ${provider.id}`)
-  console.log(`  ✓ ${provider.id}: panel=${panels.length ? 'yes' : 'no'} pool rows=${rows.length}`)
+  if (!fold) throw new Error(`render FAIL: no collapsed quota fold for ${provider.id}`)
+  if (fold.props['data-fold-open'] !== 'false') throw new Error(`render FAIL: fold for ${provider.id} must start collapsed`)
+  if (panels.length) throw new Error(`render FAIL: panel for ${provider.id} mounted before expand`)
+  console.log(`  ✓ ${provider.id}: fold=collapsed pool rows=${rows.length}`)
 }
-console.log('Tier A PASS: every provider card renders its quota panel and named pool rows')
+console.log('Tier A PASS: every provider card renders its quota fold and pool dropdown')
 
 await rm(historyDir, { recursive: true, force: true })
 console.log('\nACCEPTANCE PASS')
