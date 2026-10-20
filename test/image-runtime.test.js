@@ -2,11 +2,11 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
-import { access, mkdtemp, realpath, rm } from 'node:fs/promises'
+import { access, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { pathToFileURL } from 'node:url'
-import { apply, createImageTool, inject } from '../lib/images.js'
+import { createImageTool, createImageEditTool, installImageTools } from '../lib/images.js'
 import { ImageError } from '../lib/image-auth.js'
 
 // As in the search runtime suite, test the actual public Host packages without
@@ -152,21 +152,30 @@ test('actual Cordis registration survives repeated volatile selections and unloa
   await withRuntime(async ({ root, config, setConfig }) => {
     setConfig({ imageProviders: ['openai-codex'] })
     const volatile = { imageProviders: { get: () => config().imageProviders }, imageTimeoutMs: { get: () => config().imageTimeoutMs } }
-    const fiber = await root.plugin({ name: 'offline-image-selection', inject, apply: ctx => apply(ctx, volatile) })
+    // Exercise the same mount as Hub.apply(), including real Cordis child
+    // activation. Passing these boxes into the standalone Config would fail.
+    const fiber = await installImageTools(root, volatile)
+    // Reproduce the real Loader's exact owner-fiber dispatch filter; a plain
+    // root.emit would incorrectly let a child-owned listener pass this test.
+    const emitUpdate = () => {
+      const emitter = Object.create(root)
+      emitter[Context.filter] = owner => owner.fiber === root.fiber
+      root.emit(emitter, 'loader/volatile-update', [['imageProviders']])
+    }
     const names = () => root.tools.schemas().map(tool => tool.name).sort()
-    assert.deepEqual(names(), ['image_generate_codex'])
+    assert.deepEqual(names(), ['image_edit_codex', 'image_generate_codex'])
     for (let n = 0; n < 20; n++) {
-      setConfig({ imageProviders: ['openai-codex', 'zai', 'zai-cn', 'zai'] }); root.emit('loader/volatile-update', [['imageProviders']])
-      assert.deepEqual(names(), ['image_generate_codex', 'image_generate_zai', 'image_generate_zai_cn'])
-      setConfig({ imageProviders: [] }); root.emit('loader/volatile-update', [['imageProviders']])
+      setConfig({ imageProviders: ['openai-codex', 'zai', 'zai-cn', 'zai'] }); emitUpdate()
+      assert.deepEqual(names(), ['image_edit_codex', 'image_generate_codex', 'image_generate_zai', 'image_generate_zai_cn'])
+      setConfig({ imageProviders: [] }); emitUpdate()
       assert.deepEqual(names(), [])
     }
-    setConfig({ imageProviders: ['zai'] }); root.emit('loader/volatile-update', [['imageProviders']])
+    setConfig({ imageProviders: ['zai'] }); emitUpdate()
     assert.deepEqual(names(), ['image_generate_zai'])
     await fiber.dispose()
     assert.deepEqual(names(), [])
     // Disposed fiber listeners cannot restore registrations.
-    root.emit('loader/volatile-update', [['imageProviders']])
+    emitUpdate()
     assert.deepEqual(names(), [])
   })
 })
@@ -329,6 +338,36 @@ test('actual LocalAttachmentStore fully validates image and keeps metadata-rich 
     const invalidTool = createImageTool({ ...ctx, attachments: wrapped }, 'openai-codex', () => ({}), { generate: async () => ({ data: original.subarray(0, 40), mediaType: 'image/png' }) })
     await assert.rejects(invalidTool.execute({ prompt: 'offline corrupt image' }, { signal: newSignal(), agent: { session: {} } }), error => error.code === 'IMAGE_PROVIDER_ERROR' && error.cause === undefined)
     assert.equal(originalsSaved, 0)
+    // Real filesystem + full decoder: original bytes reach the edits transport,
+    // whereas a truncated image is rejected before any paid request.
+    const { LocalFileSystem } = await import(moduleUrl('dsh-fs-local'))
+    await root.plugin(LocalFileSystem, { cwd: resolvedDirectory })
+    await writeFile(join(resolvedDirectory, 'reference.png'), original)
+    await writeFile(join(resolvedDirectory, 'corrupt.png'), original.subarray(0, 40))
+    let edits = 0
+    const editTool = createImageEditTool({ ...ctx, get: key => key === 'fs' ? root.fs : undefined }, () => ({}), { generate: async (_ctx, _provider, body, _signal, options) => {
+      edits++
+      assert.equal(options.operation, 'edit')
+      assert.equal(body.images[0].image_url, `data:image/png;base64,${original.toString('base64')}`)
+      return { data: original, mediaType: 'image/png' }
+    } })
+    const exec = { signal: newSignal(), agent: { session: { header: { cwd: resolvedDirectory } } } }
+    const edited = await editTool.execute({ prompt: 'offline edit', imagePaths: ['reference.png'] }, exec)
+    assert.equal(edited.operation, 'edit'); assert.equal(edited.original.attachmentId, hash(original))
+    await assert.rejects(editTool.execute({ prompt: 'offline invalid', imagePaths: ['corrupt.png'] }, exec), error => error.code === 'IMAGE_REFERENCE_INVALID')
+    const pixelLimited = {
+      ...ctx,
+      get: key => key === 'fs' ? root.fs : undefined,
+      attachments: {
+        imageLimits: store.imageLimits,
+        validateImage: input => localAttachments.validateImageFile(input, { ...store.imageLimits, maxImagePixels: 1 }, store.normalizationPolicy),
+        saveImage: () => assert.fail('over-pixel reference must not be persisted'),
+        saveFile: () => assert.fail('over-pixel reference must not be persisted'),
+      },
+    }
+    const pixelTool = createImageEditTool(pixelLimited, () => ({}), { generate: async () => { edits++; assert.fail('over-pixel reference must not reach transport') } })
+    await assert.rejects(pixelTool.execute({ prompt: 'offline pixel limit', imagePaths: ['reference.png'] }, exec), error => error.code === 'IMAGE_REFERENCE_INVALID')
+    assert.equal(edits, 1)
   } finally {
     await root.fiber.dispose()
     // Verify the canonical deletion target is exactly this test-created root.

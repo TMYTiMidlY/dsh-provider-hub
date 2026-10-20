@@ -4,6 +4,8 @@
 
 一个独立的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 插件，**始终保留官方搜索，再为所有已有 `web_search` 附加 Codex / Z.AI 搜索增强**，在 Web Models 页面提供 ChatGPT/Codex OAuth 登录入口与 **多 Provider 账号额度查询 / 小时记录 / 多 Key 池 / Codex 账号池与 CLI 登录态导入**，并提供可勾选的 **Codex / Z.AI 生图工具**。
 
+> `0.6.3` 新增与文生图配套的 `image_edit_codex`：用 `imagePaths` 读取 1–5 张本地图片，经 Codex `images/edits` 编辑一张图片。生成与编辑共用参数、结果结构和交付方式；修复 Host 挂载生图子插件时重复校验 volatile 配置对象、导致工具实际未注册的问题，同时修复父子 fiber 间热更新事件无法送达。沿用当前登录与 Codex 开关，不回退文生图，不保证像素或人物样貌完全不变。包含下述 `0.6.2` 账号安全修复。
+
 > `0.6.2` 修复账号管理遗漏：原网页登录与 CLI 导入统一进入多账号池；自动保全既有账号与每次新登录；CLI 目录按明确规则发现并支持手动指定；修复异步解包假失败、切换后主额度不刷新和来源路径截断。登录态写入加并发保护，完整说明见「Codex 账号池与 CLI 登录态导入」。
 
 > `0.6.1` 聚焦额度体验第二轮：额度与 Key 池改**原生折叠块**（默认收起，展开才发探测请求）；用量曲线固定 **0–100% 纵轴**并支持 **hover 查看每个时段的消耗与计划**、订阅变化画分隔线；Codex 历史改按**登录邮箱**记录（旧账号 UUID 点自动并入同一曲线）；Key 池与 Codex 账号池改**下拉选择 + 重命名**；新增 **Codex 账号池**——从 Codex CLI 目录（全局 `~/.codex` 或 cc-switch 的 codex-gth）导入登录态作为 openai-codex 的第二种登录方式，可随时切换当前账号；设置卡新增 **Z.AI 团队版组织/项目 ID** 两个文本字段。
@@ -47,13 +49,13 @@
 
 ## 安装
 
-先在独立 `DSH_HOME` 验收，再安装到目标 Web profile。打包 `0.6.0` 使用新的目录，不覆盖之前的产物：
+先在独立 `DSH_HOME` 验收，再安装到目标 Web profile。打包 `0.6.3` 使用新的目录，不覆盖之前的产物：
 
 ```sh
 PACK_DIR="$(mktemp -d /tmp/dsh-provider-hub-pack.XXXXXX)"
 npm pack --pack-destination "${PACK_DIR:?}"
 # 在已安装 dsh 的主机上：
-npm_config_auto_install_peers=false dsh plugin --profile web add "${PACK_DIR:?}/dsh-provider-hub-0.6.0.tgz"
+npm_config_auto_install_peers=false dsh plugin --profile web add "${PACK_DIR:?}/dsh-provider-hub-0.6.3.tgz"
 ```
 
 从 `dsh-web-search` 0.3.x 升级：先 `dsh plugin --profile web remove dsh-web-search`，再按上面安装新包，并把 profile patch 中 `- id: dsh-web-search` 条目改名为 `dsh-provider-hub`（配置字段名不变，废弃的 `tool` 兼容字段可删除）。entry id 变更意味着旧配置不会自动迁移；额度三项缺省时使用默认值。
@@ -212,13 +214,38 @@ Codex 登录卡有两种方式，进入**同一个可命名、切换的账号池
 
 | 工具 | 凭据 | 默认 | 计费 |
 |---|---|---|---|
-| `image_generate_codex`（ChatGPT / Codex） | 复用 Models 页 ChatGPT/Codex OAuth | 开 | 取决于 ChatGPT 账号实际权限 |
+| `image_generate_codex` / `image_edit_codex`（ChatGPT / Codex） | 复用 Models 页 ChatGPT/Codex OAuth | 开 | 取决于 ChatGPT 账号实际权限 |
 | `image_generate_zai`（Z.AI 国际版） | `zai` 的 `ZAI_API_KEY` | 关 | GLM-Image 标准生图 API，独立计费 |
 | `image_generate_zai_cn`（智谱国内版） | `zai-coding-cn` 的 `ZAI_CODING_CN_API_KEY` | 关 | 同上，国内标准 API |
 
 - **多选是备选，不是群发**：勾选多个只是让多个工具可用，模型一次调用只用其中一个；仅当你明确要求多个提供方的结果时才分别调用。全部关闭后不注册任何生图工具，也不回退到未选中的提供方。
 - Z.AI 生图**不在 Coding Plan 已承诺的搜索/视觉额度内**，是两条标准付费 API；国内 `1113`（余额不足）以 `IMAGE_QUOTA_UNAVAILABLE` 明确提示。开启前应确认账户余额或资源包。
-- 首版仅支持**文生图**，不支持参考图编辑；凭据按区域严格隔离，绝不交叉回退。Codex 过期 grant 由 pi-ai 在 DSH 凭据锁内自动刷新，与聊天共用同一份记录。
+- Codex 开关同时注册文生图 `image_generate_codex` 与参考图编辑 `image_edit_codex`；Z.AI 仍仅支持文生图。凭据按区域严格隔离，绝不交叉回退。Codex 过期 grant 由 pi-ai 在 DSH 凭据锁内自动刷新，与聊天共用同一份记录。
+
+### 统一调用：文生图与参考图编辑（0.6.3）
+
+工具按 `image_<动作>_<提供方>` 成对命名。`image_generate_codex` 与 `image_edit_codex` 都用 `prompt`、`aspectRatio`、`background`；编辑只额外要求 `imagePaths`（1–5 个本地图片路径）。其他文生图工具沿用相同公共参数，但不支持 Codex 专属的 `background`。每次始终输出一张图片。
+
+| 参数 | 文生图 | 参考图编辑 |
+|---|---|---|
+| `prompt` | 必填：描述要生成的画面 | 必填：描述修改、保留内容与各图用途 |
+| `aspectRatio` | 可选，默认 `auto` | 相同，仍是比例提示 |
+| `background` | Codex 可选，默认 `auto` | 相同 |
+| `imagePaths` | 不接受，误传会报错而非忽略 | 必填：待编辑图在前，参考图在后 |
+
+不接受远程 URL、base64 参数或遮罩。相对路径按会话工作目录解析，绝对路径也由**调用者执行世界**的 `fs.resolve/readBytes` 读取；不会绕过隔离文件系统去读宿主文件，不自行下载 URL。初次未推送的本地编辑验证版（当时标为 0.6.2）的 `referencedImagePaths` 已统一为 `imagePaths`，旧参数会明确报错，避免静默丢图。
+
+```json
+{
+  "prompt": "提升第一张照片的清晰度，保持人物五官、表情、姿态和构图；第二张只参考明暗与颜色，不替换人物。",
+  "imagePaths": ["photos/source.jpg", "photos/lighting-reference.jpg"],
+  "aspectRatio": "3:2"
+}
+```
+
+图片先经过实际格式识别与完整解码验证，再作为 `images[].image_url` data URL 发送到 Codex `/backend-api/codex/images/edits`。单图受宿主字节/像素限制，总输入字节不超过宿主消息限制与 32 MiB 的较小值。缺图、坏图、超限或读取失败均在网络请求前拒绝，绝不默默切换为文生图。仅将指定图片发送给当前 Codex 账号；不改动输入文件。生成与编辑返回同一结果结构：`provider`、`operation`（`generate` / `edit`）、`referenceCount`（生成时为 0）、`aspectRatio`、`image`（规范化输出预览）、`original`（输出文件的原始字节）、`imageForModel`，并在可用时提供 `originalPath`，比例明显偏离时提供 `aspectWarning`。**`original` / `originalPath` 指本次输出，不是输入参考图。** 两者同样保存文件附件；当前对话模型支持看图时另带图片块。
+
+参考图编辑并不保证像素或人物样貌完全不变。人物修复必须回读对照，明确生成式细节的边界；用户要求逐张验收时，不应并行生成一批。完整成对调用示例、结果字段、生命周期和验收范围见 [图片工具契约](docs/image-tools.md)。
 
 ### 实测参数语义（0.6.0 的设计依据）
 
@@ -251,7 +278,7 @@ Codex 登录卡有两种方式，进入**同一个可命名、切换的账号池
 - **卸载或停用整个 bundle**并应用新的组合配置后，移除本包对原生 Web 的覆盖，默认回到官方 DeepSeek；用户另写的 profile/home/CLI 覆盖仍需检查。
 - **只停用 Host 插件，但保留 `web.searchProvider: dsh-provider-hub`**，会留下明确的 `WEB_PROVIDER_CONFIGURED_MISSING`，不会自动恢复。应停用整个 bundle，或同时改回 `deepseek-official`。
 - 提供方注册、设置订阅、页面和 scoped 样式随 Cordis fiber 回收；设置卡不销毁共享 `configForms` scope。
-- **关闭全部生图开关**（或把 `imageProviders` 置空）即撤销三个生图工具；执行中的调用保持启动时快照，完成后不再注册。生图能力与搜索/额度共用同一 entry，卸载整个包时一起回收。
+- **关闭全部生图开关**（或把 `imageProviders` 置空）即撤销三个文生图工具与 Codex 编辑工具；执行中的调用保持启动时快照，完成后不再注册。生图能力与搜索/额度共用同一 entry，卸载整个包时一起回收。
 - 新安装不发布、插入或修改专用 Provider Hub preset。`dsh-provider-hub/tool` 只保留模块导入兼容桥，遵循官方 `queries[]` 契约；它不会注册或恢复 `provider-hub` preset id，**不能保证已移除该 id 的旧会话自动冷恢复（cold resume）**。旧的 `query` / `provider` 调用仍需迁移。
 - 升级前检查旧 `provider-hub` 会话和默认预设选择。仍允许原生预设选择的会话及默认设置，应在移除旧 id 前改回标准模式；**已有内容的会话可能被原生选择器锁定，不能假定可以直接切换模式**。此时应先备份，再针对会话 projection identity 制定并验证迁移，或暂时保留可解析的旧预设兼容配置；本插件不自动执行这些迁移。移除该 id 后，`agentPresets.resolve('provider-hub')` 会因预设不存在而失败，仅保留工具模块不足以恢复。确认没有此 id 的会话且默认选择已是原生模式时，无需迁移会话。
 

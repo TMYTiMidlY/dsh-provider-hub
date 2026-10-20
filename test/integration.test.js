@@ -285,16 +285,20 @@ test('client stages independent OpenAI/ZAI switches and only Codex OAuth without
 
 test('Host mounts native providers without shadowing any preset tool or prompt', () => {
   let plugins = 0
+  let imageMount
   const registered = []
   const hooks = []
   apply({
-    plugin: () => { plugins++ },
+    plugin: (definition, config) => { plugins++; if (definition.name === 'dsh-image-tools') imageMount = { definition, config } },
     on: (event, handler, options) => { hooks.push([event, options]); return () => {} },
     web: { registerSearchProvider: value => { registered.push(value) } },
     tools: { register: () => { throw new Error('Host must not register tools') } },
     systemPrompt: { section: () => { throw new Error('Host must not change preset prompts') } },
   }, { searchProviders: [], enabledProviders: PROVIDERS, timeoutMs: 60000, searchMaxResults: 200, quotaRecord: true, quotaIntervalMinutes: 60, quotaHistoryDays: 180 })
   assert.equal(plugins, 5, 'search login bridge, key pool, codex accounts, quota service and image tools mount together')
+  assert.ok(imageMount, 'the actual Hub mount uses the image child')
+  assert.equal(imageMount.definition.Config, undefined, 'already-validated live boxes must not enter a second raw-value schema')
+  assert.equal(imageMount.config, undefined, 'the child captures the parent live config instead of revalidating boxed values')
   assert.deepEqual(hooks, [['internal/config', { global: true }], ['credentials/record-updated', undefined]], 'native config hook plus account preservation on official credential changes')
   assert.deepEqual(registered.map(provider => provider.id).sort(), [ROUTER_PROVIDER_ID, 'openai-codex', 'zai', 'google-zread'].sort())
   assert.ok(registered.every(provider => typeof provider.search === 'function' && typeof provider.available === 'function'))
