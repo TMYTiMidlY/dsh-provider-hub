@@ -77,7 +77,7 @@ test('import stores a named record, dedupes by account and keeps the fresher gra
   assert.equal(imported.active, false, 'nothing is active until the official record matches')
   const record = credentials.records.get(CODEX_ACCOUNT_PREFIX + imported.id)
   assert.equal(record.kind, 'grant')
-  assert.equal(record.payload.source, 'codex')
+  assert.equal(record.payload.source, 'cli')
   assert.equal(record.payload.accountId, 'acct-vickie')
   // Re-importing the same directory refreshes the same slot, not a new one.
   const again = await pool.importFrom({ source: 'codex', name: 'vickie-2' })
@@ -87,7 +87,7 @@ test('import stores a named record, dedupes by account and keeps the fresher gra
   assert.equal(credentials.records.size, 1)
   const stale = await pool.importFrom({ source: 'codex', name: 'ignored' })
   assert.equal(stale.id, imported.id, 'the same account keeps one slot')
-  assert.equal(await pool.importFrom({ source: 'nope' }).then(() => 'resolved', error => error.message), 'unknown Codex CLI source: nope')
+  await assert.rejects(pool.importFrom({ source: 'nope' }), /未找到选择的 CLI 目录/u)
 })
 
 test('list reports views without token material and marks the active grant', async t => {
@@ -153,7 +153,8 @@ test('the service mounts with non-reserved wire names and the fixed CLI sources'
   for (const reserved of ['remove', 'has', 'install', 'installDirect', 'installScoped', 'assertMethodAvailable']) {
     assert.ok(!new RegExp(`async ${reserved}\\(`).test(serviceRegion), `wire name ${reserved} is reserved`)
   }
-  assert.match(source, /40b7472da8db3f767b3960f45bb06cfe45a2918d5600f1a475530f55489c50a4/u, 'the gth launch directory matches the sync tool')
+  assert.ok(!source.includes('40b7472da8db3f767b3960f45bb06cfe45a2918d5600f1a475530f55489c50a4'), 'discovery must not hardcode a personal CLI directory')
+  assert.ok(source.includes('.cc-switch-launches'))
   for (const method of ['list', 'sources', 'import', 'drop', 'rename', 'setActive']) {
     assert.match(serviceRegion, new RegExp(`async ${method}\\(`, 'u'), `service exposes ${method}`)
   }

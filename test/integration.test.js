@@ -57,6 +57,11 @@ test('Typert metadata declares every endpoint the browser mounts, host and remot
   const client = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
   const ids = list => list.map(item => item.id).sort()
   assert.deepEqual(ids(host.invocations), ids(remote.descriptors), 'host face and remote face declare the same endpoints')
+  const window = {}
+  vm.runInNewContext(client.replace('  const loader = window.__ModuleLoader__', '  window.testRemote = remote; const loader = window.__ModuleLoader__'), { window })
+  const signature = descriptors => JSON.parse(JSON.stringify(Array.from(descriptors, item => ({ id: item.id, namespace: item.namespace, method: item.method, parameters: Array.from(item.parameters, p => ({ name: p.name, wire: p.wire, source: p.source, codec: p.codec.typeSymbol })), result: item.result.typeSymbol })).sort((a,b) => a.id.localeCompare(b.id))))
+  assert.deepEqual(signature(window.testRemote.descriptors), signature(host.invocations), 'browser and host parameter codecs also stay in sync')
+  assert.deepEqual(signature(remote.descriptors), signature(host.invocations), 'remote and host signatures stay in sync')
   assert.ok(host.invocations.length > 0)
   for (const descriptor of host.invocations) {
     // The HTTP gateway serves /api/<namespace>/<method> straight from this
@@ -290,7 +295,7 @@ test('Host mounts native providers without shadowing any preset tool or prompt',
     systemPrompt: { section: () => { throw new Error('Host must not change preset prompts') } },
   }, { searchProviders: [], enabledProviders: PROVIDERS, timeoutMs: 60000, searchMaxResults: 200, quotaRecord: true, quotaIntervalMinutes: 60, quotaHistoryDays: 180 })
   assert.equal(plugins, 5, 'search login bridge, key pool, codex accounts, quota service and image tools mount together')
-  assert.deepEqual(hooks, [['internal/config', { global: true }]], 'the uniform source cap rides the loader config waterfall, not a tool shadow')
+  assert.deepEqual(hooks, [['internal/config', { global: true }], ['credentials/record-updated', undefined]], 'native config hook plus account preservation on official credential changes')
   assert.deepEqual(registered.map(provider => provider.id).sort(), [ROUTER_PROVIDER_ID, 'openai-codex', 'zai', 'google-zread'].sort())
   assert.ok(registered.every(provider => typeof provider.search === 'function' && typeof provider.available === 'function'))
 })

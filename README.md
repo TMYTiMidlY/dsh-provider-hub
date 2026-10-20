@@ -4,6 +4,8 @@
 
 一个独立的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 插件，**始终保留官方搜索，再为所有已有 `web_search` 附加 Codex / Z.AI 搜索增强**，在 Web Models 页面提供 ChatGPT/Codex OAuth 登录入口与 **多 Provider 账号额度查询 / 小时记录 / 多 Key 池 / Codex 账号池与 CLI 登录态导入**，并提供可勾选的 **Codex / Z.AI 生图工具**。
 
+> `0.6.2` 修复账号管理遗漏：原网页登录与 CLI 导入统一进入多账号池；自动保全既有账号与每次新登录；CLI 目录按明确规则发现并支持手动指定；修复异步解包假失败、切换后主额度不刷新和来源路径截断。登录态写入加并发保护，完整说明见「Codex 账号池与 CLI 登录态导入」。
+
 > `0.6.1` 聚焦额度体验第二轮：额度与 Key 池改**原生折叠块**（默认收起，展开才发探测请求）；用量曲线固定 **0–100% 纵轴**并支持 **hover 查看每个时段的消耗与计划**、订阅变化画分隔线；Codex 历史改按**登录邮箱**记录（旧账号 UUID 点自动并入同一曲线）；Key 池与 Codex 账号池改**下拉选择 + 重命名**；新增 **Codex 账号池**——从 Codex CLI 目录（全局 `~/.codex` 或 cc-switch 的 codex-gth）导入登录态作为 openai-codex 的第二种登录方式，可随时切换当前账号；设置卡新增 **Z.AI 团队版组织/项目 ID** 两个文本字段。
 
 > `0.6.0` 在 `0.5.x` 之上把生图能力并入同一 Host entry：三个全局工具（`image_generate_codex`、`image_generate_zai`、`image_generate_zai_cn`）与包详情页里的"生图工具"三选开关。输入只有 `prompt` 与**比例提示** `aspectRatio`——实测该订阅端点把分辨率归一化到固定像素预算、忽略 `quality`，因此这两个参数不再暴露；比例被内容改写时结果中会出现软警告但图片照常返回。搜索、登录、额度与 Key 池行为与 `0.5.x` 一致。
@@ -184,13 +186,25 @@ Models 页面中只有 `llm-pi-ai` 的 ChatGPT/Codex provider 行显示本插件
 
 ### Codex 账号池与 CLI 登录态导入
 
-Codex 登录卡提供 openai-codex 的**第二种登录方式**：把 Codex CLI 已有的登录态直接搬进来，不点浏览器 OAuth。适用于机器上已用 `codex login` 登录过、或用 cc-switch 管理多个 CLI 目录（如全局 `codex` 与 `codex-gth`）的场景。
+Codex 登录卡有两种方式，进入**同一个可命名、切换的账号池**：
 
-- **导入源是目录选择**：导入表单列出本机的 Codex CLI 目录（全局 `~/.codex/auth.json` 与 cc-switch 启动目录里的 codex-gth），各自的邮箱与 token 到期时间直接预览；目录缺失或未登录会标注「暂无可用登录态」。导入时可命名（留空默认用邮箱）。
+1. **网页登录**：仍走 DSH 官方 ChatGPT OAuth，不复制授权实现。原来的已登录账号会自动保全；点击「添加 / 登录另一个账号」之前先保存旧账号，成功后把新账号保存进池。取消或登录失败不会删除旧账号。可以分别命名多个网页登录账号。
+2. **CLI 登录态导入**：读取选定 Codex home 内的 `auth.json`；只添加账号，不自动切换当前账号。
+
+**CLI 发现标准**（只读、不执行程序、不递归扫描整个主目录）：
+
+- 检查 Host 进程的 `CODEX_HOME` 和全局 `~/.codex`。
+- 检查上述 home 的 `.cc-switch-launches` 一级子目录；不再写死某一台机器的 gth 哈希路径。
+- 只读 `~/.local/bin/codex-*` 启动器中明确的字面 `CODEX_HOME` 赋值；忽略注释、动态 shell 表达式，不执行启动器。
+- 可手动指定绝对目录或 `~/目录` 并点击重新发现；按真实路径去重。若实际 `codex-gth` 配置在其它位置，可直接选它的 home。
+- 仅完整的 OAuth `tokens.access_token`、`refresh_token`、`account_id`（或 JWT 中的账号 ID）与有效过期时间可导入；API Key 登录、缺文件、损坏文件分别标明状态。过期 OAuth 可导入保留，但不能设为当前，需重新登录或导入更新后的凭据。系统钥匙串中没有写入 `auth.json` 的登录态不在文件发现范围。
+- 来源下拉只显示短名称，选中后的完整目录、邮箱、到期时间与发现规则另列展示，避免路径被截断。导入时可命名（留空默认用邮箱）。
 - **账号池即凭据记录**：每个命名账号是一条 `dsh-provider-hub/codex-account-<8hex>` 凭据记录（kind grant，payload 内带名字/来源/导入时间），secret 只进 `$DSH_HOME/.credentials.yaml`，remote 桥只返回名字、ID、邮箱前缀与到期事实，**从不返回 token**。
-- **切换 = 官方写路径**：设为当前会先把现用官方 grant 按「token 更新鲜者胜」回写进它自己的池槽（避免切走即丢新 token），再经 `modifyRecord` 把所选 grant 写入官方 `llm-pi-ai/openai-codex` 记录——对话、搜索与额度在下一次操作立即使用新账号，无需重启。同一账号重复导入/切换时保留 `expires` 更晚的一组 token。
+- **切换 = 官方写路径**：先确保现用官方 grant 已有池槽，再经 `modifyRecord` 把所选 grant 写入官方 `llm-pi-ai/openai-codex` 记录。若切换期间官方凭据已被另一端刷新，拒绝覆盖并提示重试；网页登录进行中也不能切换。官方凭据更新事件会保全新快照，刷新 token 不会让当前账号标识失效。当前账号不能直接删除，须先切换。
+- **身份与刷新**：邮箱与 workspace/account ID 联合区分账号，避免合并同团队不同用户或同邮箱不同工作区。CLI 重复导入保留过期时间更晚的一组，网页登录成功则以官方新提交的登录态为准；写入时核对当前快照，避免旧缓存倒灌。
+- **界面即时同步**：修复池操作未等待远程 Promise 就解包导致的假失败；切换后同步刷新主额度与账号池。操作有重复提交保护，导入/发现/加载/切换错误分别提示，不再把成功导入显示成「无法读取登录状态」。
 - **每账号额度预览**：账号池里任一账号可展开独立的额度面板（按该 grant 查询，token 过期会如实显示过期态）。Codex 用量历史绑定登录邮箱，切换账号各自成线。
-- 注意：CLI 与 DSH 使用同一 OAuth client，两边各自刷新会轮换 refresh token（先刷新的一边使另一边的 refresh 失效）；切换语义下可接受——被踢的一边重新导入/登录即可。
+- 注意：CLI 导入是登录态快照，不是两个客户端间的持续同步。CLI 与 DSH 独立刷新可能使其中一份 refresh token 失效；出现失效应重新网页登录或导入更新后的快照。需要长期并行使用时，优先在 DSH 内单独完成网页登录，不建议依赖同一 CLI 会话的 token 副本。
 
 ## 生图工具
 

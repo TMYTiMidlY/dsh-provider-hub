@@ -321,3 +321,25 @@ test('quota previews a pooled Codex account grant by id', async () => {
   grantRecord.payload.expires = now - 1
   assert.equal((await svc.snapshot({ provider: 'openai-codex', grantId: 'ab12cd34', maxAgeMs: 0 })).status, 'expired', 'an expired pooled grant reports the expired state')
 })
+
+test('Codex request uses the real account id header while history remains email keyed', async () => {
+  let header
+  const svc = service({ fetchImpl: async (_url, options) => {
+    header = options.headers['chatgpt-account-id']
+    return jsonResponse({ ...liveFixture(), rate_limit_reset_credits: undefined })
+  } })
+  const view = await svc.snapshot()
+  assert.equal(header, 'acct-1', 'the HTTP header is not the email history key')
+  assert.equal(view.snapshot.account, 'quota@example.test')
+})
+
+test('a Codex grant id can never send OAuth credentials to another provider', async () => {
+  let calls = 0
+  const svc = service({ fetchImpl: async () => { calls++; throw new Error('must not reach network') } })
+  svc.codexAccounts = { grant: async () => grant().payload }
+  for (const provider of ['zai', 'zai-coding-cn', 'kimi-coding']) {
+    assert.equal((await svc.snapshot({ provider, grantId: 'ab12cd34' })).status, 'signed-out')
+  }
+  assert.equal((await svc.snapshot({ provider: 'openai-codex', grantId: 'ab12cd34', keyId: 'aabbccdd' })).status, 'signed-out')
+  assert.equal(calls, 0)
+})

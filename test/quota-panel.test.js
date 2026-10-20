@@ -10,8 +10,11 @@ function createHarness() {
   const states = new Map()
   const root = { path: '#root', counters: new Map(), cursor: 0 }
   const stack = [root]
+  let visited = new Set()
+  const sameDeps = (left, right) => Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((value, index) => Object.is(value, right[index]))
   const hooks = () => {
     const frame = stack[stack.length - 1]
+    visited.add(frame.path)
     const slots = states.get(frame.path) ?? []
     states.set(frame.path, slots)
     return { frame, slots }
@@ -37,14 +40,31 @@ function createHarness() {
       slots[frame.cursor++] ??= { ref: { current: initial } }
       return slots[frame.cursor - 1].ref
     },
-    useEffect(effect) {
+    useEffect(effect, deps) {
       const { frame, slots } = hooks()
       const slot = slots[frame.cursor++] ??= { ran: false }
-      if (!slot.ran) { slot.ran = true; effect() }
+      if (!slot.ran || !sameDeps(slot.deps, deps)) {
+        slot.cleanup?.()
+        slot.ran = true
+        slot.deps = deps
+        slot.cleanup = effect()
+      }
     },
-    useCallback(fn) { hooks().frame.cursor++; return fn },
+    useCallback(fn, deps) {
+      const { frame, slots } = hooks()
+      const slot = slots[frame.cursor++] ??= {}
+      if (!sameDeps(slot.deps, deps)) { slot.deps = deps; slot.callback = fn }
+      return slot.callback
+    },
   }
-  const render = factory => { root.counters = new Map(); root.cursor = 0; return factory() }
+  const render = factory => {
+    root.counters = new Map(); root.cursor = 0; visited = new Set()
+    const tree = factory()
+    for (const [path, slots] of states) {
+      if (!visited.has(path)) { for (const slot of slots) slot?.cleanup?.(); states.delete(path) }
+    }
+    return tree
+  }
   return { React, render }
 }
 
@@ -105,10 +125,11 @@ async function mountPanel(quota, options = {}) {
   const pool = options.pool ?? emptyPool()
   const accounts = options.accounts ?? emptyAccounts()
   const { React, render } = createHarness()
+  const clientCapture = {}
   const plugin = loadClient(React)
   let cardFactory
   const capture = { inject: (name, callback) => callback(), register: (seat, callback) => { cardFactory = callback } }
-  const searchLogin = { list: async () => ({ ok: true, value: { entries: [{ key: 'llm-pi-ai/openai-codex', authorized: true, methods: [{ id: 'oauth', label: 'OAuth' }], inFlight: false }] } }) }
+  const searchLogin = options.searchLogin ?? { list: async () => ({ ok: true, value: { entries: [{ key: 'llm-pi-ai/openai-codex', authorized: true, methods: [{ id: 'oauth', label: 'OAuth' }], inFlight: false }] } }) }
   const bundles = {}
   await plugin.apply({
     locale: {
@@ -121,12 +142,12 @@ async function mountPanel(quota, options = {}) {
     slots: { inject: (name, callback) => callback(), register: () => {} },
     configForms: { get: () => ({ getSnapshot: () => ({ state: 'unavailable' }), subscribe: () => () => {}, mutate: async () => { throw new Error('not served') } }), whileServed: () => () => {} },
     effect: callback => { callback(); return () => {} },
-    remote: { $mount: async () => async () => {} },
+    remote: { $mount: async descriptor => { clientCapture.remote = descriptor; return async () => {} } },
     inject: (_deps, callback) => { callback({ remote: { searchLogin, quota, keyPool: pool, codexAccounts: accounts }, slots: capture }); return Object.assign(Promise.resolve(), { dispose: async () => {} }) },
   })
   assert.ok(cardFactory, 'provider-card render captured')
   const draw = () => render(() => cardFactory({ provider: { provider }, keyConfigured: options.keyConfigured ?? (provider === 'openai-codex') }))
-  return { draw, pool, accounts }
+  return { draw, pool, accounts, remoteDescriptor: clientCapture.remote }
 }
 
 const settle = async () => { for (let i = 0; i < 6; i++) await new Promise(resolve => setImmediate(resolve)) }
@@ -369,7 +390,8 @@ test('Codex account pool lists sources, imports, switches, renames and drops', a
   const quota = {
     snapshot: async request => {
       calls.snapshot.push(request)
-      return { ok: true, value: { status: 'ok', snapshot: { account: 'vickie@example.test', email: 'vickie@example.test', windows: [{ kind: 'weekly', usedPercent: 20 }] }, fetchedAt: Math.floor(Date.now() / 1000) } }
+      const email = entries.find(entry => request.grantId ? entry.id === request.grantId : entry.active)?.email
+      return { ok: true, value: { status: 'ok', snapshot: { account: email, email, windows: [{ kind: 'weekly', usedPercent: 20 }] }, fetchedAt: Math.floor(Date.now() / 1000) } }
     },
     history: async request => {
       calls.history.push(request)
@@ -377,14 +399,15 @@ test('Codex account pool lists sources, imports, switches, renames and drops', a
     },
   }
   const entries = [
-    { id: 'ab12cd34', name: 'vickie', accountId: 'b8508d9e…', email: 'vickie@example.test', expires: 1790000000, active: true },
-    { id: 'ef567890', name: 'qq', accountId: '8c8d6075…', email: 'qq@example.test', expires: 1790000600, active: false },
+    { id: 'ab12cd34', name: 'vickie', accountId: 'b8508d9e…', email: 'vickie@example.test', expires: 1790000000, active: true, source: 'web' },
+    { id: 'ef567890', name: 'qq', accountId: '8c8d6075…', email: 'qq@example.test', expires: 1790000600, active: false, source: 'cli', sourcePath: '/home/synthetic/.codex', expired: true },
   ]
   const accounts = {
     list: async () => ({ ok: true, value: { entries } }),
     sources: async () => ({ ok: true, value: { sources: [
-      { id: 'codex', path: '/home/synthetic/.codex/auth.json', available: true, accountId: '8c8d6075…', email: 'qq@example.test', expires: 1790000600 },
-      { id: 'codex-gth', path: '/home/synthetic/.codex/.cc-switch-launches/x/auth.json', available: false },
+      { id: 'codex', label: 'codex（全局 ~/.codex）', path: '/home/synthetic/.codex', authPath: '/home/synthetic/.codex/auth.json', available: true, status: 'ok', email: 'qq@example.test', expires: 1990000600 },
+      { id: 'codex-gth', label: 'codex-gth', path: '/home/synthetic/.codex/.cc-switch-launches/x', authPath: '/home/synthetic/.codex/.cc-switch-launches/x/auth.json', available: true, status: 'expired', email: 'gth@example.test', expires: 1790000600 },
+      { id: 'missing', label: 'Missing directory', path: '/home/synthetic/absent', available: false, status: 'missing' },
     ] } }),
     import: async request => { calls.import.push(request); entries.push({ id: '99aabbcc', name: request.name || 'gth', email: 'gth@example.test', active: false }); return { ok: true, value: { entry: { id: '99aabbcc' } } } },
     drop: async request => { calls.drop.push(request); return { ok: true, value: {} } },
@@ -405,19 +428,29 @@ test('Codex account pool lists sources, imports, switches, renames and drops', a
   assert.deepEqual(options.map(option => option.props['data-codex-option']), ['ab12cd34', 'ef567890'])
   assert.match(options[0].props.children, /vickie（当前生效）/u)
   // The import form previews both CLI directories with their availability.
-  const importForm = nodes.find(node => node.props?.['data-codex-import'])
+  let importForm = nodes.find(node => node.props?.['data-codex-import'])
   assert.ok(importForm, 'the import form renders inside the fold')
   const sourceOptions = nodes.filter(node => node.props?.['data-codex-source'])
-  assert.deepEqual(sourceOptions.map(option => option.props['data-codex-source']), ['codex', 'codex-gth'])
+  assert.deepEqual(sourceOptions.map(option => option.props['data-codex-source']), ['codex', 'codex-gth', 'missing'])
   assert.match(sourceOptions[0].props.children, /codex（全局/u)
-  assert.match(sourceOptions[0].props.children, /qq@example.test/u)
-  assert.match(sourceOptions[1].props.children, /暂无可用登录态/u)
+  assert.ok(!sourceOptions[0].props.children.includes('qq@example.test'), 'email is not squeezed into an option')
+  assert.match(sourceOptions[1].props.children, /已过期/u)
+  assert.equal(sourceOptions[1].props.disabled, false, 'expired sources remain importable')
+  assert.equal(sourceOptions[2].props.disabled, true, 'unusable sources are disabled')
+  assert.equal(nodes.find(node => node.props?.['data-codex-source-path']).props.children, '/home/synthetic/.codex')
+  assert.match(nodes.find(node => node.props?.['data-codex-source-status']).props.children, /qq@example.test/u)
 
-  // Import carries the chosen directory and optional name.
-  await importForm.props.onSubmit({ preventDefault: () => {}, currentTarget: { elements: { source: { value: 'codex-gth' }, name: { value: 'gth' } } } })
+  // Import carries the chosen source and optional name, but never switches.
+  nodes.find(node => node.props?.['data-codex-source-select']).props.onChange({ target: { value: 'codex-gth' } })
+  nodes = flatten(draw())
+  importForm = nodes.find(node => node.props?.['data-codex-import'])
+  await importForm.props.onSubmit({ preventDefault: () => {}, currentTarget: { elements: { name: { value: 'gth' } } } })
   await settleLoop()
   assert.deepEqual(calls.import.map(call => ({ ...call })), [{ source: 'codex-gth', name: 'gth' }])
+  assert.equal(calls.setActive.length, 0, 'import does not switch accounts')
   nodes = flatten(draw())
+  assert.match(nodes.find(node => node.props?.['data-codex-notice']).props.children, /当前账号未切换/u)
+  assert.ok(calls.snapshot.filter(request => !request.grantId).length >= 2, 'import refreshes the main quota panel')
   assert.deepEqual(nodes.filter(node => node.props?.['data-codex-option']).map(option => option.props['data-codex-option']), ['ab12cd34', 'ef567890', '99aabbcc'])
 
   // Per-account quota preview passes the grant id.
@@ -441,6 +474,9 @@ test('Codex account pool lists sources, imports, switches, renames and drops', a
   assert.deepEqual(calls.setActive.map(call => ({ ...call })), [{ id: 'ef567890' }])
   nodes = flatten(draw())
   assert.match(nodes.find(node => node.props?.['data-codex-current']).props.children, /qq@example.test/u, 'the current line follows the switch')
+  assert.equal(nodes.find(node => node.props?.['data-quota-email']).props.children, 'qq@example.test', 'the main quota panel follows the switch, not only the pool')
+  assert.equal(calls.snapshot.filter(request => !request.grantId).at(-1).maxAgeMs, 0, 'mutation refresh bypasses the quota cache')
+  assert.ok(!nodes.some(node => node.props?.['data-codex-operation-error']), 'awaited successful actions do not show generic errors')
   // Removing the imported account drops its record.
   nodes.find(node => node.props?.['data-codex-select']).props.onChange({ target: { value: '99aabbcc' } })
   nodes = flatten(draw())
@@ -448,4 +484,215 @@ test('Codex account pool lists sources, imports, switches, renames and drops', a
   await settleLoop()
   assert.deepEqual(calls.drop.map(call => ({ ...call })), [{ id: '99aabbcc' }])
   assert.ok(!JSON.stringify(flatten(draw())).includes('access'), 'no rendered node carries grant material')
+})
+
+const uiQuota = () => ({
+  snapshot: async () => ({ ok: true, value: { status: 'ok', snapshot: { account: 'synthetic', windows: [] } } }),
+  history: async () => ({ ok: true, value: { points: [] } }),
+})
+const settleDraw = async draw => { for (let i = 0; i < 8; i++) { await new Promise(resolve => setImmediate(resolve)); draw() } }
+const textOf = node => {
+  if (Array.isArray(node)) return node.map(textOf).join(' ')
+  if (node && typeof node === 'object') return textOf(node.props?.children)
+  return typeof node === 'string' ? node : ''
+}
+const formEvent = elements => ({ preventDefault() {}, currentTarget: { elements } })
+
+test('CLI source contract passes request objects and shows full custom directory details', async () => {
+  const calls = { sources: [], import: [] }
+  const home = '/home/synthetic/very-long-codex-home-path/another-account-with-a-long-name'
+  const accounts = {
+    ...emptyAccounts(),
+    list: async () => ({ ok: true, value: { entries: [], current: { email: 'outside-pool@example.test', source: 'existing' } } }),
+    sources: async request => {
+      calls.sources.push(request)
+      return { ok: true, value: { policy: 'Only fixed and bounded cc-switch homes are discovered.', sources: request.directory ? [
+        { id: 'directory', label: 'Other Codex home', path: home, authPath: `${home}/auth.json`, available: true, status: 'ok', email: 'custom@example.test', expires: 1990000000 },
+      ] : [] } }
+    },
+    import: async request => { calls.import.push(request); return { ok: true, value: { entry: { id: 'new-cli' } } } },
+  }
+  const { draw, remoteDescriptor } = await mountPanel(uiQuota(), { accounts })
+  const sourceDescriptor = remoteDescriptor.descriptors.find(item => item.service === 'codexAccounts' && item.method === 'sources')
+  assert.equal(sourceDescriptor.parameters.length, 1, 'the client descriptor agrees with the host request contract')
+  assert.equal(sourceDescriptor.parameters[0].name, 'request')
+  assert.deepEqual({ ...sourceDescriptor.parameters[0].codec.create().parse({ directory: '~/codex-work' }) }, { directory: '~/codex-work' })
+  assert.throws(() => sourceDescriptor.parameters[0].codec.create().parse('~/codex-work'))
+  openFold(flatten(draw()))
+  await settleDraw(draw)
+  let nodes = flatten(draw())
+  assert.deepEqual(calls.sources.map(request => ({ ...request })), [{}], 'default discovery passes an object, not undefined')
+  assert.match(nodes.find(node => node.props?.['data-codex-current']).props.children, /outside-pool@example.test/u, 'a current account outside the pool is not reported signed out')
+  assert.ok(nodes.find(node => node.props?.['data-codex-action'] === 'import').props.disabled)
+  nodes.find(node => node.type === 'input' && node.props.name === 'directory').props.onChange({ target: { value: '~/codex-work' } })
+  nodes = flatten(draw())
+  await nodes.find(node => node.props?.['data-codex-directory']).props.onSubmit(formEvent({}))
+  await settleDraw(draw)
+  nodes = flatten(draw())
+  assert.deepEqual(calls.sources.map(request => ({ ...request })), [{}, { directory: '~/codex-work' }])
+  assert.equal(nodes.find(node => node.props?.['data-codex-source-select']).props.value, 'directory')
+  assert.equal(nodes.find(node => node.props?.['data-codex-source-path']).props.children, home)
+  assert.equal(nodes.find(node => node.props?.['data-codex-source-auth-path']).props.children, `${home}/auth.json`)
+  assert.match(nodes.find(node => node.props?.['data-codex-source-status']).props.children, /custom@example.test.*可导入/u)
+  assert.match(nodes.find(node => node.props?.['data-codex-source-policy']).props.children, /bounded cc-switch/u)
+  assert.equal(nodes.find(node => node.props?.['data-codex-source']).props.children, 'Other Codex home', 'the option contains only its concise label')
+  await nodes.find(node => node.props?.['data-codex-import']).props.onSubmit(formEvent({ name: { value: 'Custom CLI' } }))
+  assert.deepEqual(calls.import.map(request => ({ ...request })), [{ directory: home, name: 'Custom CLI' }])
+
+  nodes = flatten(draw())
+  nodes.find(node => node.type === 'input' && node.props.name === 'directory').props.onChange({ target: { value: 'relative/not-allowed' } })
+  nodes = flatten(draw())
+  await nodes.find(node => node.props?.['data-codex-directory']).props.onSubmit(formEvent({}))
+  nodes = flatten(draw())
+  assert.equal(calls.sources.length, 2, 'relative paths never reach host discovery')
+  assert.match(textOf(nodes.find(node => node.props?.['data-codex-source-error'])), /绝对路径/u)
+})
+
+test('source and account load errors remain separate, visible and retryable', async () => {
+  let sourceFails = true
+  let listFails = true
+  const accounts = {
+    ...emptyAccounts(),
+    list: async () => listFails ? { ok: false, error: { message: 'synthetic list denial' } } : { ok: true, value: { entries: [{ id: 'web-account', name: 'Browser account', email: 'web@example.test', source: 'web', active: true }] } },
+    sources: async () => sourceFails ? { ok: false, error: { message: 'synthetic directory denial' } } : { ok: true, value: { sources: [{ id: 'codex', label: 'Default Codex', path: '/home/synthetic/.codex', available: true, status: 'ok' }] } },
+  }
+  const { draw } = await mountPanel(uiQuota(), { accounts })
+  openFold(flatten(draw()))
+  await settleDraw(draw)
+  let nodes = flatten(draw())
+  assert.match(textOf(nodes.find(node => node.props?.['data-codex-list-error'])), /加载账号池失败.*synthetic list denial/u)
+  assert.match(textOf(nodes.find(node => node.props?.['data-codex-source-error'])), /加载 CLI 来源失败.*synthetic directory denial/u)
+  assert.ok(!nodes.find(node => node.props?.['data-codex-current']).props.children.includes('未登录'), 'a list error never invents a signed-out current account')
+  assert.equal(nodes.find(node => node.props?.['data-codex-action'] === 'import').props.disabled, true)
+  listFails = false
+  await flatten(nodes.find(node => node.props?.['data-codex-list-error'])).find(node => node.type === 'button').props.onClick()
+  nodes = flatten(draw())
+  assert.ok(!nodes.some(node => node.props?.['data-codex-list-error']))
+  assert.match(textOf(nodes.find(node => node.props?.['data-codex-account-meta'])), /网页授权.*web@example.test/u)
+  assert.ok(nodes.some(node => node.props?.['data-codex-source-error']), 'a successful pool load does not swallow a source failure')
+  sourceFails = false
+  await nodes.find(node => node.props?.['data-codex-directory']).props.onSubmit(formEvent({}))
+  nodes = flatten(draw())
+  assert.ok(!nodes.some(node => node.props?.['data-codex-source-error']))
+  assert.equal(nodes.find(node => node.props?.['data-codex-action'] === 'import').props.disabled, false)
+})
+
+test('async import and switch errors show operation context and block duplicate mutations', async () => {
+  let resolveImport
+  let resolveSwitch
+  const calls = { import: 0, switch: 0, snapshot: 0 }
+  const accounts = {
+    ...emptyAccounts(),
+    list: async () => ({ ok: true, value: { entries: [{ id: 'other', name: 'Other', email: 'other@example.test', source: 'existing', active: false }] } }),
+    sources: async () => ({ ok: true, value: { sources: [{ id: 'codex', label: 'Default', path: '/home/synthetic/.codex', available: true, status: 'ok' }] } }),
+    import: async () => { calls.import++; return await new Promise(resolve => { resolveImport = resolve }) },
+    setActive: async () => { calls.switch++; return await new Promise(resolve => { resolveSwitch = resolve }) },
+  }
+  const quota = { ...uiQuota(), snapshot: async () => { calls.snapshot++; return { ok: true, value: { status: 'ok', snapshot: { account: 'current', windows: [] } } } } }
+  const { draw } = await mountPanel(quota, { accounts })
+  openFold(flatten(draw()))
+  await settleDraw(draw)
+  let nodes = flatten(draw())
+  const submitImport = nodes.find(node => node.props?.['data-codex-import']).props.onSubmit
+  const importEvent = formEvent({ name: { value: '' } })
+  const pendingImport = submitImport(importEvent)
+  await submitImport(importEvent)
+  assert.equal(calls.import, 1, 'same-render double submit cannot import twice')
+  nodes = flatten(draw())
+  assert.equal(nodes.find(node => node.props?.['data-codex-action'] === 'use').props.disabled, true)
+  assert.equal(nodes.find(node => node.props?.['data-login-action'] === 'start').props.disabled, true)
+  resolveImport({ ok: false, error: { message: 'synthetic invalid auth file' } })
+  await pendingImport
+  nodes = flatten(draw())
+  assert.match(textOf(nodes.find(node => node.props?.['data-codex-operation-error'])), /导入失败.*synthetic invalid auth file/u)
+  assert.equal(calls.snapshot, 1, 'a failed import does not imply a successful quota refresh')
+  const switchAccount = nodes.find(node => node.props?.['data-codex-action'] === 'use').props.onClick
+  const pendingSwitch = switchAccount()
+  await switchAccount()
+  assert.equal(calls.switch, 1, 'same-render repeated switch cannot reenter')
+  resolveSwitch({ ok: false, error: { message: 'synthetic grant missing' } })
+  await pendingSwitch
+  nodes = flatten(draw())
+  assert.match(textOf(nodes.find(node => node.props?.['data-codex-operation-error'])), /切换账号失败.*synthetic grant missing/u)
+  assert.equal(nodes.find(node => node.props?.['data-codex-action'] === 'use').props.disabled, false)
+  assert.equal(calls.snapshot, 1, 'a failed switch keeps the current quota panel')
+})
+
+test('browser login reuses searchLogin.start and preserves notices while refreshing pool and quota', async () => {
+  const calls = { start: [], answer: [], list: 0, snapshot: 0 }
+  const entries = []
+  let resolveStart
+  const searchLogin = {
+    list: async () => ({ ok: true, value: { entries: [{ key: 'llm-pi-ai/openai-codex', authorized: true, inFlight: false }] } }),
+    start: async request => { calls.start.push(request); return await new Promise(resolve => { resolveStart = resolve }) },
+    answer: async (id, value) => {
+      calls.answer.push({ id, value })
+      entries.push({ id: 'new-web', name: 'Second browser', email: 'browser@example.test', source: 'web', active: true })
+      return { ok: true, value: { id, status: 'authorized' } }
+    },
+  }
+  const accounts = { ...emptyAccounts(), list: async () => { calls.list++; return { ok: true, value: { entries } } } }
+  const quota = { ...uiQuota(), snapshot: async () => { calls.snapshot++; return { ok: true, value: { status: 'ok', snapshot: { email: entries[0]?.email || 'old@example.test', windows: [] } } } } }
+  const { draw } = await mountPanel(quota, { accounts, searchLogin })
+  openFold(flatten(draw()))
+  await settleDraw(draw)
+  let nodes = flatten(draw())
+  assert.match(nodes.find(node => node.props?.['data-login-action'] === 'start').props.children, /添加.*另一个账号/u)
+  assert.ok(nodes.some(node => node.props?.['data-web-login']))
+  assert.ok(nodes.some(node => node.props?.['data-codex-cli-login']))
+  nodes.find(node => node.type === 'input' && node.props.name === 'accountName').props.onChange({ target: { value: 'Second browser' } })
+  nodes = flatten(draw())
+  const start = nodes.find(node => node.props?.['data-login-action'] === 'start').props.onClick
+  const pendingStart = start()
+  await start()
+  assert.equal(calls.start.length, 1, 'OAuth start is guarded before rerender')
+  resolveStart({ ok: true, value: { id: 'attempt-web', status: 'waiting', notice: { message: 'Authorize the new account', url: 'https://example.test/oauth', code: 'SYNTHETIC' }, prompt: { message: 'Paste confirmation', kind: 'text' } } })
+  await pendingStart
+  nodes = flatten(draw())
+  assert.deepEqual(calls.start.map(request => ({ ...request })), [{ key: 'llm-pi-ai/openai-codex', accountName: 'Second browser' }])
+  assert.equal(nodes.find(node => node.props?.['data-login-action'] === 'open').props.href, 'https://example.test/oauth')
+  assert.match(textOf(nodes.find(node => node.props?.['data-login-notice'])), /Authorize the new account.*SYNTHETIC/u)
+  const previousLists = calls.list
+  await nodes.find(node => node.type === 'form' && node.props['aria-label'] === '确认 ChatGPT 授权').props.onSubmit(formEvent({ answer: { value: 'confirmed' } }))
+  await settleDraw(draw)
+  nodes = flatten(draw())
+  assert.deepEqual(calls.answer, [{ id: 'attempt-web', value: 'confirmed' }])
+  assert.ok(calls.list > previousLists, 'OAuth completion refreshes the shared account pool')
+  assert.equal(nodes.find(node => node.props?.['data-codex-option']).props['data-codex-option'], 'new-web')
+  assert.match(textOf(nodes.find(node => node.props?.['data-codex-account-meta'])), /网页授权/u)
+  assert.equal(nodes.find(node => node.props?.['data-quota-email']).props.children, 'browser@example.test')
+  assert.equal(calls.snapshot, 2, 'OAuth completion refreshes the main quota panel')
+})
+
+test('KeyPool awaits rejected mutations, preserves rename drafts and guards add reentry', async () => {
+  let finishAdd
+  let resetCount = 0
+  const calls = { add: 0 }
+  const pool = {
+    ...emptyPool(),
+    list: async () => ({ ok: true, value: { entries: [{ id: 'named-key', name: 'Existing', active: false }] } }),
+    rename: async () => ({ ok: false, error: { message: 'synthetic rename rejection' } }),
+    add: async () => { calls.add++; return await new Promise(resolve => { finishAdd = resolve }) },
+  }
+  const { draw } = await mountPanel(uiQuota(), { provider: 'zai', keyConfigured: true, pool })
+  openFold(flatten(draw()))
+  await settleDraw(draw)
+  let nodes = flatten(draw())
+  nodes.find(node => node.props?.['data-pool-action'] === 'rename').props.onClick()
+  nodes = flatten(draw())
+  await nodes.find(node => node.props?.['data-pool-rename']).props.onSubmit(formEvent({ name: { value: 'New name' } }))
+  nodes = flatten(draw())
+  assert.match(textOf(nodes.find(node => node.props?.role === 'alert')), /重命名失败.*synthetic rename rejection/u)
+  assert.ok(nodes.some(node => node.props?.['data-pool-rename']), 'failed rename keeps the editing form')
+  const event = formEvent({ name: { value: 'New key' }, value: { value: 'synthetic-test-only' } })
+  event.currentTarget.reset = () => { resetCount++ }
+  const add = nodes.find(node => node.props?.['data-pool-add']).props.onSubmit
+  const pending = add(event)
+  await add(event)
+  assert.equal(calls.add, 1)
+  finishAdd({ ok: false, error: { message: 'synthetic add rejection' } })
+  await pending
+  nodes = flatten(draw())
+  assert.match(textOf(nodes.find(node => node.props?.role === 'alert')), /添加失败.*synthetic add rejection/u)
+  assert.equal(resetCount, 0, 'failed remote add does not erase the form')
 })
