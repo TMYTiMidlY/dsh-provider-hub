@@ -12,21 +12,21 @@ test('package pins a private volatile-capable Schema builder without bundling du
   // A peer would resolve to a pre-existing profile-root Schema, which may lack
   // volatile support. A direct exact dependency gives this plugin its own
   // builder while runtime services continue to come from the Host.
-  assert.deepEqual(manifest.dependencies, { '@deepseek-ai/schemastery': '3.18.5-alpha.1' })
+  assert.deepEqual(manifest.dependencies, { '@deepseek-ai/schemastery': '~3.18.5' })
   assert.equal(Object.hasOwn(manifest.peerDependencies, '@deepseek-ai/schemastery'), false)
   assert.deepEqual(manifest.peerDependencies, {
-    '@deepseek-ai/cordis': '>=4.0.5-alpha.1',
-    '@deepseek-ai/dsh-tool-web': '>=0.2.1-alpha.1',
-    '@deepseek-ai/dsh-authorization': '>=0.2.1-alpha.1',
-    '@deepseek-ai/dsh-credentials': '>=0.2.1-alpha.1',
-    '@deepseek-ai/dsh-tools': '>=0.2.1-alpha.1',
-    '@deepseek-ai/dsh-attachment': '>=0.2.1-alpha.1',
-    '@deepseek-ai/dsh-llm': '>=0.2.1-alpha.1',
-    '@earendil-works/pi-ai': '0.87.1',
-    '@deepseek-ai/dsh-typert-protocol': '>=0.2.1-alpha.1',
-    '@deepseek-ai/dsh-web': '>=0.2.1-alpha.1',
+    '@deepseek-ai/cordis': '~4.0.5',
+    '@deepseek-ai/dsh-tool-web': '0.2.1-rc.2',
+    '@deepseek-ai/dsh-authorization': '0.2.1-rc.2',
+    '@deepseek-ai/dsh-credentials': '0.2.1-rc.2',
+    '@deepseek-ai/dsh-tools': '0.2.1-rc.2',
+    '@deepseek-ai/dsh-attachment': '0.2.1-rc.2',
+    '@deepseek-ai/dsh-llm': '0.2.1-rc.2',
+    '@earendil-works/pi-ai': '1.3.0',
+    '@deepseek-ai/dsh-typert-protocol': '0.2.1-rc.2',
+    '@deepseek-ai/dsh-web': '0.2.1-rc.2',
   })
-  assert.deepEqual(manifest.devDependencies, { '@deepseek-ai/dsh-client-ui-primitives': '0.2.1-alpha.1' }, 'real-model settings tests need the browser library in CI')
+  assert.deepEqual(manifest.devDependencies, { '@deepseek-ai/dsh-client-ui-primitives': '0.2.1-rc.2' }, 'real-model settings tests need the browser library in CI')
   assert.equal(manifest.exports['./images'], './lib/images.js')
 })
 

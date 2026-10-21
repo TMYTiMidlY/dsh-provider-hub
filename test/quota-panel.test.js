@@ -166,6 +166,18 @@ async function mountPanel(quota, options = {}) {
   return { draw, pool, accounts, remoteDescriptor: clientCapture.remote, dependencies: clientCapture.dependencies }
 }
 
+test('Models account management never renders search marketing or credential-reuse copy', async () => {
+  for (const locale of ['zh', 'en']) for (const provider of ['openai-codex', 'zai', 'zai-coding-cn']) {
+    const quota = { snapshot: async () => ({ ok: true, value: { status: 'signed-out' } }), history: async () => ({ ok: true, value: { status: 'ok', points: [] } }) }
+    const { draw } = await mountPanel(quota, { locale, provider, keyConfigured: true })
+    openManagement(flatten(draw()))
+    await settleDraw(draw)
+    const text = flatten(draw()).filter(node => node.type !== 'style').map(node => typeof node.props?.children === 'string' ? node.props.children : '').join('\n')
+    assert.doesNotMatch(text, /搜索|search/iu)
+    if (provider !== 'openai-codex') assert.match(text, locale === 'zh' ? /只预览额度与历史/u : /only previews its quota/u)
+  }
+})
+
 const settle = async () => { for (let i = 0; i < 6; i++) await new Promise(resolve => setImmediate(resolve)) }
 
 // The quota area lives behind a native fold: collapsed by default, so its
@@ -266,7 +278,7 @@ test('QuotaPanel falls back to the placeholder and keeps data on history failure
   for (let i = 0; i < 8; i++) { await new Promise(resolve => setImmediate(resolve)); draw() }
   const nodes = flatten(draw())
   assert.ok(nodes.find(node => node.props?.['data-quota-section']), 'panel still renders')
-  assert.ok(nodes.some(node => (typeof node.props?.children === 'string' && node.props.children.includes('暂无历史记录'))), 'placeholder shows when history fails')
+  assert.ok(nodes.some(node => (typeof node.props?.children === 'string' && node.props.children.includes('尚无历史记录'))), 'placeholder shows when history fails')
   assert.ok(nodes.find(node => node.props?.['data-quota-window']), 'snapshot data survives a history failure')
 })
 

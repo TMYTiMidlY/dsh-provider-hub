@@ -185,6 +185,16 @@ test('team projects sharing a key have isolated cache and history, including off
   assert.equal(new Set(text.trim().split('\n').map(line => JSON.parse(line).queryScope)).size, 2)
 })
 
+test('maintenance failure does not erase successful sampling status or stop the next tick', async () => {
+  let compactCalls = 0, points = 0
+  const svc = service({ history: { append: async () => { points++ }, compact: async () => { if (++compactCalls === 1) throw new Error('temporary maintenance failure') } }, fetch: async () => response(usage()) })
+  assert.equal((await svc.record())['openai-codex'], 'ok')
+  assert.equal(svc.lastRecorderResults.statuses['openai-codex'], 'ok')
+  assert.equal((await svc.record())['openai-codex'], 'ok')
+  assert.equal(compactCalls, 2)
+  assert.equal(points, 2)
+})
+
 test('compaction preserves independent workspace latest points and serialized concurrent appends', async t => {
   const root = await temporary(t), store = new QuotaHistory(join(root, 'history.jsonl'), { now: () => NOW })
   const old = NOW / 1000 - 20 * 86400

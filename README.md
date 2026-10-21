@@ -4,9 +4,11 @@
 
 一个独立的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 插件，**始终保留官方搜索，再为所有已有 `web_search` 附加 Codex / Z.AI 搜索增强**，在 Web Models 页面提供 ChatGPT/Codex OAuth 登录入口与 **多 Provider 账号额度查询 / 小时记录 / 多 Key 池 / Codex 账号池与 CLI 登录态导入**，并提供可勾选的 **Codex / Z.AI 生图工具**。
 
+> `0.7.0` 以 **DSH 0.2.1-rc.2** 为唯一宿主基线，Cordis/Schemastery 使用稳定 4.0.5/3.18.5 系列，Pi 对齐本机已验证的 1.3.0。撤除旧 alpha 宿主补丁工具，不改写 DSH，不调整当前「账号池与额度」按钮位置；是否并排另行讨论。Models 页不再出现搜索凭据说明。账号添加/CLI 导入及官方登录态更新后请求首次采样，之后继续独立定时采样；历史接口同时返回不含凭据的采样状态，区分等待、成功、未遍历、过期、网络失败与关闭记录。
+
 > `0.6.4` 额度区只保留**一份随所选账号变化的只读预览**，选择不会切换真实账号；重命名/删除图标同在列表行，选择旁仅保留「设为当前」。不支持额度 API 的 provider 不展示历史区。Z.AI 和 Z.AI Coding CN 均可添加普通/团队账号，团队组织/项目按账号保存并隔离缓存和历史。修复正常 63 分钟采样被整点分桶误断；池内 Codex 账号独立只读采样，增加请求时限与固定周期、防重入及身份隔离。名称占位符使用通用示例。图表保留完整时间窗口，并常显百分比纵轴与关键样本数值。
 
-> `0.6.3` 统一 Models 页「账号池与额度」入口：官方编辑旁的同款按钮、默认零额外面板高度；自定义账号列表与行内图标重命名；网页登录/CLI 导入共用添加入口和名称。CLI 默认目录明确显示实际路径，复用 DSH 的可视化服务器目录浏览，支持 Windows/WSL 路径。历史图按完整 24 小时 / 7 天 / 30 天时间窗口定位，缺失时段留白，不拉伸、不补零。原生按钮扩展位及兼容回退见下文。
+> `0.6.3` 统一 Models 页「账号池与额度」入口：官方编辑旁的同款按钮、默认零额外面板高度；自定义账号列表与行内图标重命名；网页登录/CLI 导入共用添加入口和名称。CLI 默认目录明确显示实际路径，复用 DSH 的可视化服务器目录浏览，支持 Windows/WSL 路径。历史图按完整 24 小时 / 7 天 / 30 天时间窗口定位，缺失时段留白，不拉伸、不补零。这是旧宿主时代的界面记录；0.7.0 起以当前 rc.2 公共接口为准，不再提供该宿主补丁。
 
 > `0.6.2` 修复账号管理遗漏：原网页登录与 CLI 导入统一进入多账号池；自动保全既有账号与每次新登录；CLI 目录按明确规则发现并支持手动指定；修复异步解包假失败、切换后主额度不刷新和来源路径截断。登录态写入加并发保护，完整说明见「Codex 账号池与 CLI 登录态导入」。
 
@@ -57,14 +59,14 @@
 PACK_DIR="$(mktemp -d /tmp/dsh-provider-hub-pack.XXXXXX)"
 npm pack --pack-destination "${PACK_DIR:?}"
 # 在已安装 dsh 的主机上：
-npm_config_auto_install_peers=false dsh plugin --profile web add "${PACK_DIR:?}/dsh-provider-hub-0.6.0.tgz"
+npm_config_auto_install_peers=false dsh plugin --profile web add "${PACK_DIR:?}/dsh-provider-hub-0.7.0.tgz"
 ```
 
 从 `dsh-web-search` 0.3.x 升级：先 `dsh plugin --profile web remove dsh-web-search`，再按上面安装新包，并把 profile patch 中 `- id: dsh-web-search` 条目改名为 `dsh-provider-hub`（配置字段名不变，废弃的 `tool` 兼容字段可删除）。entry id 变更意味着旧配置不会自动迁移；额度三项缺省时使用默认值。
 
 安装命令仅对这一次 `dsh plugin add` 设置 `npm_config_auto_install_peers=false`：DSH peer 包由正在运行的 Host 提供，避免在 profile 中自动安装第二份 DSH 类库而造成跨副本类型身份不一致。不修改全局 npm/pnpm 配置；CI 或独立源码开发中的普通 `npm install` 仍正常安装所需 peers。
 
-插件仅将私有 schema-builder `@deepseek-ai/schemastery@3.18.5-alpha.1` 固定为精确直接依赖，避免旧 profile validator 遮蔽支持 `.volatile()` 的构建器；它不是第二套 DSH runtime。不删除或升级 profile 中供其他插件使用的旧 schema 包，也不升级 Host。
+本版本仅支持当前验证过的 DSH `0.2.1-rc.2`；DSH peers 精确对齐该版本，Cordis 为 `~4.0.5`，Pi peer 为 `1.3.0`。私有 schema-builder 使用稳定的 `@deepseek-ai/schemastery@~3.18.5`，不是第二套 DSH runtime；不再维护旧 alpha 宿主兼容。开发测试也必须使用与目标 Host 同一身份的 runtime 模块，不能把旧 alpha peer 和 rc.2 Host 混装后将类型身份错误当成产品行为。不删除用户已有凭据、账号或旧历史；数据格式兼容与旧宿主兼容是不同边界。
 
 根据插件管理器返回的应用状态处理：已应用的配置可直接验收；需要重启的安装或更新应安排目标 profile 重启，然后完整刷新浏览器加载 client 模块。不要在旧 DSH 进程仍运行时覆盖全局 DSH 安装目录；安装本插件不要求升级 DSH。
 
@@ -153,22 +155,13 @@ Models 页面中只有 `llm-pi-ai` 的 ChatGPT/Codex provider 行显示本插件
 
 ### 账号额度展示与记录
 
-模型页每个支持的 provider 使用同名 **「账号池与额度」按钮**：在有 `settings.models.provider-actions` 扩展位的 DSH 中，与官方「编辑」并列并复用官方按钮样式。**默认不挂载管理区，不额外增加卡片正文高度，也不发账号/额度/CLI 来源请求；首次点击才加载**。收起后管理区不占高度，已开始的登录流程与后台记录不被取消。旧 DSH 没有动作扩展位时，回退成正文内单个紧凑按钮，不操纵官方 DOM、不覆盖官方编辑器。
+模型页每个支持的 provider 使用同名 **「账号池与额度」按钮**。当前 rc.2 公开的是 `settings.models.provider-card` 正文扩展位，没有编辑/删除动作栏的公开插槽；因此保持现有正文入口，不承诺与「编辑」同排。本轮不修改按钮位置，也不通过 DOM 或私有 bundle 补丁伪造扩展位。管理面板默认不挂载，首次点击才发账号/额度/CLI 来源请求；收起后管理区不占高度，已开始的登录流程与后台记录不被取消。
 
 管理区只有**一份所选账号的额度与历史预览**：列表加载后默认选当前账号；选择其他账号仅切换预览，不写入或切换实际凭据。选择控件旁只有「设为当前」按钮（已是当前则禁用），重命名与删除图标放在列表每行，当前 Codex 账号不能删除。池为空而官方凭据已配置时，单份面板显示官方当前账号。Codex 的「添加账号」共用一份可选名称，通过「网页登录 / 导入 CLI」切换；API Key provider 保留密码类型 Key 输入，名称占位符一律为通用工作账号示例。明确不支持额度查询（例如 Xiaomi Token Plan）的面板只显示说明与控制台入口，不显示或轮询历史。
 
 每个额度面板提供 24 小时 / 7 天 / 30 天用量曲线：**纵轴固定 0–100%，横轴固定为查询时刻向前的完整所选时间窗口**，按样本真实时间戳定位，不按样本序号铺满。未采集的前后时段留白；按相邻记录**真实时间差**与各点保存的采样周期判断断档（1.5 倍容差，旧点默认 1 小时），不再因跨整点误断正常的 63/64 分钟间隔，也不使用今天的配置反推所有旧记录。真实长空档仍不连线或填色；单条记录仅画点，空图不伪造值。固定百分比纵轴及首尾/关键点值常显在真实数据位置，悬停补充精确到分钟的采样时间、已用百分比和计划；计划变化时画竖直分隔线。面板每 60 秒自动重读本地历史，旧范围的慢响应不能覆盖新范围。Codex 历史按**登录邮箱**标记账号，旧 UUID 记录自动并入；API Key 类按 Key 哈希分别记录。
 
-**当前 DSH 的按钮扩展位兼容工具**：随包提供 [model-actions-compat.mjs](scripts/model-actions-compat.mjs)，只允许显式执行，不在插件启动/安装时自动改写 DSH。它为已知 Models bundle 补充中性的 keyed 动作扩展位，不改变编辑/删除逻辑；全部锚点、语法与契约先校验，未知或部分修改的布局拒绝写入。原文件按 SHA-256 备份，保留模式，提供带内容冲突保护的回滚。两个文件不能构成单个文件系统事务；异常中断可在确认没有存活操作后按 journal 显式回滚，不盲删遗留锁。卸载插件不自动修改 DSH；更新覆盖兼容扩展后插件仍能回退使用。
-
-```sh
-node scripts/model-actions-compat.mjs --check --root /absolute/dsh/install
-node scripts/model-actions-compat.mjs --apply --root /absolute/dsh/install
-# 仅在确认需要恢复且目标没有被其他更新覆盖时：
-node scripts/model-actions-compat.mjs --rollback --root /absolute/dsh/install
-```
-
-兼容工具生成新的已构建客户端产物后，需要重载服务的客户端 roster，并刷新原 Web 页面。没有浏览器 DOM/截图自动化的环境只能完成结构、交互状态及接口验收，不应将其标为真实浏览器视觉验收。
+**按钮扩展位现状**：旧版本曾通过显式宿主补丁增加 `settings.models.provider-actions`；它不是 rc.2 官方契约，升级后失效正是正文入口出现的原因。0.7.0 撤除该旧工具及其旧版夹具测试，不自动修改或恢复宿主。将来如果需要稳定的同排入口，应先有上游公开动作插槽，再按该契约实现，而不是重新套用旧锚点。没有真实浏览器 DOM/截图验收时，结构、交互和接口测试不能冒充视觉验收。
 
 额度查询全部是**只读**第一方接口，凭据只读不刷新、不记录、不返回浏览器：
 
@@ -184,6 +177,7 @@ node scripts/model-actions-compat.mjs --rollback --root /absolute/dsh/install
 
 | 触发 | 行为 |
 |---|---|
+| 添加/更新账号 | 插件添加 API Key、CLI 导入成功，或官方 Codex 登录态更新后，异步请求首次采样，不等待下一轮小时任务；采样失败不把成功添加伪报成失败，仍尊重 `quotaRecord=false` |
 | 后台定时 | DSH 运行期间按 `quotaIntervalMinutes`（默认 60）记录当前凭据、所有 API Key 池条目及所有 Codex 池账号，不需要切换账号；同一 Codex 身份优先使用较新有效凭据去重。页面关闭不影响，过期凭据不请求或刷新 |
 | 打开账号池与额度 | 首次点击挂载面板并发起查询；缓存 5 分钟内复用，超过才请求上游。收起不重新探测，已挂载面板仍可按原周期重读本地历史 |
 | 面板打开期间 | 每 60 秒自动重读用量历史（本地读盘，不发上游请求），曲线随记录点持续更新 |
@@ -302,6 +296,6 @@ DSH_HOME=/absolute/path/to/isolated-home dsh web --no-open --port 3981
 - Remote bridge 不返回 access token/API key，只返回 flow 状态、通知和 prompt。
 - Key 池的秘密只写进官方凭据库引用（`KEY_POOL_*`，0600）；插件元数据文件与 remote 桥都只暴露名字、ID 与状态，不含 Key 值。切换生效 Key 只改写 provider 的官方引用。
 - 自定义 Google reader 只接收搜索 URL；部署者应使用 HTTPS、受控 endpoint 并审查访问日志。
-- 原生注册使用公开 `ctx.web.registerSearchProvider`。官方 DeepSeek 委托在 DSH `0.2.1-alpha.1` 读取内部 `searchProviders` registry，这是 **alpha 私有兼容边界**：仅有结构 guard，并按该版本契约测试，没有运行时 version gate；结构不兼容时 fail closed，不覆盖官方 `search` 或写入私有 `searchProviderId`。
+- 原生注册使用公开 `ctx.web.registerSearchProvider`。官方 DeepSeek 委托仍读取有结构 guard 的 `searchProviders` registry，这是当前 rc.2 已测但非公开承诺的边界；结构不符时 fail closed，不覆盖官方 `search` 或写入私有 `searchProviderId`。宿主升级需重新验证，不对旧 alpha 版本作支持承诺。
 
 升级 DSH 后应重新测试原生 `queries[]`、旧会话、多模式与 PTC、开关暂存与保存、组合公平合并/URL 去重/总体上限、单路和全路失败、整体取消/超时、运维覆盖、OAuth 状态与取消、窄屏及键盘操作，以及停用/卸载恢复。此文描述契约与预期行为，不代替目标部署验收。

@@ -2,27 +2,31 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
-import { access, mkdtemp, realpath, rm } from 'node:fs/promises'
+import { readFile, mkdtemp, realpath, rm } from 'node:fs/promises'
 import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import { apply, createImageTool, inject } from '../lib/images.js'
+import { ToolRuntime as PeerToolRuntime } from '@deepseek-ai/dsh-tools'
+import { HarnessError as PeerHarnessError } from '@deepseek-ai/dsh-llm'
 import { ImageError } from '../lib/image-auth.js'
 
-// As in the search runtime suite, test the actual public Host packages without
-// silently skipping CI. DSH_TEST_RUNTIME_ROOT can name an isolated installation.
+// Exercise the explicit current Host, never silently fall back to older local
+// peers. Local source imports must resolve the same public class identities as
+// the Host plugin resolver: an old alpha HarnessError is not an rc2 instance.
+// Use an isolated dependency overlay, not changes to the live Host or primary
+// workspace, when running this suite against a separate DSH installation.
 const explicitRoot = process.env.DSH_TEST_RUNTIME_ROOT
-const packageRoot = join(explicitRoot ?? '/usr/local/lib/node_modules/@deepseek-ai/dsh', 'node_modules/@deepseek-ai')
-let usePeers = false
-try { await access(join(packageRoot, 'dsh-tools/lib/index.js')) } catch (error) {
-  if (explicitRoot !== undefined || !['ENOENT', 'ENOTDIR'].includes(error.code)) throw error
-  usePeers = true
-}
-const moduleUrl = name => usePeers ? import.meta.resolve(`@deepseek-ai/${name}`) : pathToFileURL(join(packageRoot, name, 'lib/index.js')).href
+assert.ok(explicitRoot, 'Set DSH_TEST_RUNTIME_ROOT to the rc2 Host installation')
+assert.equal(JSON.parse(await readFile(join(explicitRoot, 'package.json'), 'utf8')).version, '0.2.1-rc.2')
+const packageRoot = join(explicitRoot, 'node_modules/@deepseek-ai')
+const moduleUrl = name => pathToFileURL(join(packageRoot, name, 'lib/index.js')).href
 const [{ Context }, { SystemPrompt }, { ToolRuntime }, { createScope }, timeoutPolicy, localAttachments, llm] = await Promise.all([
   import(moduleUrl('cordis')), import(moduleUrl('dsh-system-prompt')), import(moduleUrl('dsh-tools')),
   import(moduleUrl('dsh-scope')), import(moduleUrl('dsh-tool-call-timeout-policy')), import(moduleUrl('dsh-attachment-local')), import(moduleUrl('dsh-llm')),
 ])
+assert.equal(PeerToolRuntime, ToolRuntime, 'source tests and explicit Host must share the rc2 dsh-tools identity; use an isolated peer overlay')
+assert.equal(PeerHarnessError, llm.HarnessError, 'machine error classification needs the exact Host HarnessError identity, not a second/alpha copy')
 const sharp = createRequire(moduleUrl('dsh-attachment-local'))('sharp')
 const source = Buffer.from('OFFLINE_RUNTIME_IMAGE')
 const hash = data => `sha256:${createHash('sha256').update(data).digest('hex')}`
@@ -49,10 +53,14 @@ async function withRuntime(operation, { mode = 'native', modalities = ['text', '
     root.provide('attachments', attachments)
     root.provide('credentials', { readRecord() { throw new Error('REAL_CREDENTIAL_READ_FORBIDDEN') } })
     root.provide('fs', { processPathFromHostPath: path => `/execution${path}` })
+    root.provide('workingDirectory', { async ensure(agent, signal) { signal.throwIfAborted(); assert.ok(agent.session); return '/offline/workspace' } })
     root.provide('llm', { async resolveModelInfo(provider, model) { routes.push([provider, model]); return { inputModalities: modalities } } })
     await root.plugin(ToolRuntime, { mode })
     const agent = { options: { provider: 'default-route', model: 'default-model' }, session: { header: { cwd: '/offline/workspace' }, requestHeader: () => ({ config: { provider: 'accepted-route', model: 'accepted-model' } }), append(type, data) { calls.push({ type, data }) } } }
     const scope = createScope(root, agent); scopes.push(scope)
+    // rc2's run_code bridge retains a PTC environment on the actual Agent
+    // context and releases it through that context's lifecycle.
+    agent.ctx = scope.ctx
     const generateStub = generate ?? (async (_ctx, provider, body, signal) => { signal.throwIfAborted(); calls.push({ type: 'generate', provider, body }); return { data: source, mediaType: 'image/png' } })
     const makeTool = provider => createImageTool(root, provider, () => config, { generate: generateStub, codexAuth: async () => { throw new Error('REAL_AUTH_FORBIDDEN') } })
     let next = 0
@@ -71,6 +79,7 @@ async function scopedToolEffect(scope, callback) {
 }
 
 function installFakePtc(root, { timeoutMs, maximum = 600000 } = {}) {
+  const observed = { requests: [], released: [] }
   const run = async spec => {
     const child = spec.bindings[0].functions.image_generate_codex({ prompt: 'offline nested image' })
     if (timeoutMs === undefined) return { logs: [], value: await child }
@@ -79,7 +88,8 @@ function installFakePtc(root, { timeoutMs, maximum = 600000 } = {}) {
       return await Promise.race([child.then(value => ({ logs: [], value })), new Promise(done => { timer = setTimeout(() => done({ logs: [], error: { kind: 'timeout', message: `execution deadline reached (${timeoutMs}ms)` } }), timeoutMs) })])
     } finally { clearTimeout(timer) }
   }
-  root.provide('ptcRuntime', { language: 'typescript', timeout: { defaultMs: timeoutMs ?? 120000, maxMs: maximum }, resolve: spec => spec, run })
+  root.provide('ptcRuntime', { language: 'typescript', isolation: 'offline-fixture', programFormat: 'function-body', timeout: { defaultMs: timeoutMs ?? 120000, maxMs: maximum }, resolve: spec => { observed.requests.push(spec); return spec }, run, release: async owner => { observed.released.push(owner) } })
+  return observed
 }
 
 function assertFailure(result, code) {
@@ -107,7 +117,7 @@ test('actual registry validates image inputs/outputs and retains machine errors 
     assert.deepEqual(attachments.writes, [])
     setConfig({ imageTimeoutMs: 300000 })
     const result = await invoke()
-    assert.equal(result.isError, false)
+    assert.equal(result.isError, false, JSON.stringify(result))
     assert.equal(result.value.original.attachmentId, hash(source))
     assert.deepEqual(result.content.map(block => block.type), ['text', 'file', 'image'])
     assert.equal(result.additionalContexts, undefined)
@@ -181,12 +191,12 @@ test('disabling/disposal blocks later dispatch but drains an already-started sna
     assertFailure(await invoke(), 'UNKNOWN_TOOL')
     finish.resolve()
     const result = await pending
-    assert.equal(result.isError, false)
+    assert.equal(result.isError, false, JSON.stringify(result))
     assert.equal(generations, 1)
   }, { generate: async () => { generations++; started.resolve(); await finish.promise; return { data: source, mediaType: 'image/png' } } })
 })
 
-test('native and PTC/both visibility share the same restricted dispatch, without mode overrides', async () => {
+test('rc2 native and PTC visibility share restricted dispatch and restore the native surface', async () => {
   await withRuntime(async ({ root, makeTool, invoke, scope, agent, calls }) => {
     root.tools.register(makeTool('openai-codex')); installFakePtc(root)
     assert.deepEqual(root.tools.wireSchemas(agent).schemas.map(tool => tool.name), ['image_generate_codex'])
@@ -199,10 +209,40 @@ test('native and PTC/both visibility share the same restricted dispatch, without
     assert.equal(blocked.isError, true)
     assert.equal(calls.filter(row => row.type === 'generate').length, 0)
     deny(); restore()
-    const restoreBoth = await scopedToolEffect(scope, tools => tools.presentAs('both'))
-    assert.deepEqual(root.tools.wireSchemas(agent).schemas.map(tool => tool.name), ['image_generate_codex', 'run_code'])
-    restoreBoth()
+    assert.deepEqual(root.tools.wireSchemas(agent).schemas.map(tool => tool.name), ['image_generate_codex'], 'disposing the PTC scope restores native names, not a hybrid surface')
+    assert.equal((await invoke()).isError, false)
+    assert.equal(calls.filter(row => row.type === 'generate').length, 1)
   })
+  await assert.rejects(withRuntime(async () => assert.fail('rc2 cannot activate an unsupported hybrid presentation'), { mode: 'both' }), /expected.*native.*ptc.*both/u)
+})
+
+test('deployment PTC mode exposes only run_code and still permits guarded nested image calls', async () => {
+  await withRuntime(async ({ root, makeTool, invoke, agent, calls }) => {
+    root.tools.register(makeTool('openai-codex')); installFakePtc(root)
+    assert.deepEqual(root.tools.wireSchemas(agent).schemas.map(tool => tool.name), ['run_code'])
+    assertFailure(await invoke(), 'UNKNOWN_TOOL')
+    assert.equal(calls.filter(row => row.type === 'generate').length, 0)
+    const result = await invoke({ description: 'offline nested call', code: 'mock' }, { name: 'run_code' })
+    assert.equal(result.isError, false, JSON.stringify(result))
+    assert.equal(calls.filter(row => row.type === 'generate').length, 1)
+  }, { mode: 'ptc' })
+})
+
+test('rc2 PTC bridge resolves Host cwd and releases one retained environment with its Agent context', async () => {
+  let observed; let owner
+  await withRuntime(async ({ root, makeTool, invoke, agent }) => {
+    owner = agent
+    root.tools.register(makeTool('openai-codex')); observed = installFakePtc(root)
+    for (let index = 0; index < 2; index++) {
+      const result = await invoke({ description: 'offline retained lifecycle', code: 'mock' }, { name: 'run_code' })
+      assert.equal(result.isError, false, JSON.stringify(result))
+    }
+    assert.equal(observed.requests.length, 2)
+    assert.ok(observed.requests.every(spec => spec.cwd === '/offline/workspace' && spec.stateOwner === agent))
+    assert.ok(observed.requests.every(spec => spec.signal.aborted), 'settled runs are drained before returning')
+    assert.equal(observed.released.length, 0, 'the retained environment survives individual calls')
+  }, { mode: 'ptc' })
+  assert.deepEqual(observed.released, [owner], 'Agent context disposal releases its environment exactly once')
 })
 
 test('real Host PTC bridge forwards one vision image context and one pure-text file context', async () => {
@@ -210,7 +250,7 @@ test('real Host PTC bridge forwards one vision image context and one pure-text f
     await withRuntime(async ({ root, makeTool, invoke, calls }) => {
       root.tools.register(makeTool('openai-codex')); installFakePtc(root)
       const result = await invoke({ description: 'offline PTC image', code: 'mock', timeoutMs: 400000 }, { name: 'run_code' })
-      assert.equal(result.isError, false)
+      assert.equal(result.isError, false, JSON.stringify(result))
       assert.equal(result.additionalContexts.length, 1)
       const context = result.additionalContexts[0]
       assert.deepEqual(context.content.map(block => block.type), modalities.includes('image') ? ['text', 'file', 'image'] : ['text', 'file'])
@@ -218,7 +258,7 @@ test('real Host PTC bridge forwards one vision image context and one pure-text f
       const dispatch = calls.find(row => row.type === 'tool/ptc-dispatch')
       assert.equal(dispatch.data.isError, false)
       assert.equal(dispatch.data.content.some(block => block.type === 'file'), true)
-    }, { mode: 'both', modalities })
+    }, { mode: 'ptc', modalities })
   }
 })
 
@@ -231,7 +271,7 @@ test('post-execute blocking discards image and file contexts in real PTC forward
       assert.equal(result.isError, true)
       assert.equal(result.additionalContexts, undefined)
       assert.doesNotMatch(JSON.stringify(result), /sha256:/u)
-    }, { mode: 'both', modalities })
+    }, { mode: 'ptc', modalities })
   }
 })
 
@@ -284,7 +324,7 @@ test('outer PTC deadline cancels and drains the nested generation without a retr
     assert.equal(cleaned, true)
     assert.equal(generations, 1)
     assertFailure(childResult, 'IMAGE_ABORTED'); assertUncertain(childResult)
-  }, { mode: 'both', generate: async (_ctx, _provider, _body, signal) => { generations++; return new Promise((resolve, reject) => signal.addEventListener('abort', () => { cleaned = true; reject(signal.reason) }, { once: true })) } })
+  }, { mode: 'ptc', generate: async (_ctx, _provider, _body, signal) => { generations++; return new Promise((resolve, reject) => signal.addEventListener('abort', () => { cleaned = true; reject(signal.reason) }, { once: true })) } })
 })
 
 test('quiescent cancellation waits for non-cancellable attachment validation and starts no later writes', async () => {
