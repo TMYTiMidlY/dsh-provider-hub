@@ -6,7 +6,7 @@ import vm from 'node:vm'
 // Minimal hook-capable React stand-in: function components expand inline and
 // each instance keeps its own hook state, keyed by tree path plus React key —
 // the same isolation real reconciliation gives conditionally mounted panels.
-function createHarness() {
+function createHarness({ chartWidth = 240 } = {}) {
   const states = new Map()
   const root = { path: '#root', counters: new Map(), cursor: 0 }
   const stack = [root]
@@ -27,6 +27,7 @@ function createHarness() {
         const node = { type, props: merged }
         if (props?.ref && typeof props.ref === 'object') props.ref.current = {
           focus() { node.focused = (node.focused || 0) + 1 },
+          getBoundingClientRect() { return { width: chartWidth } },
           contains(target) { return flatten(node).includes(target) },
           querySelectorAll() { return flatten(node).filter(child => child.props?.['data-account-choice']).map(child => child.props.ref?.current || { focus() { child.focused = (child.focused || 0) + 1 } }) },
         }
@@ -137,7 +138,7 @@ async function mountPanel(quota, options = {}) {
   const provider = options.provider ?? 'openai-codex'
   const pool = options.pool ?? emptyPool()
   const accounts = options.accounts ?? emptyAccounts()
-  const { React, render } = createHarness()
+  const { React, render } = createHarness({ chartWidth: options.chartWidth })
   const clientCapture = { dependencies: [] }
   const plugin = loadClient(React)
   let cardFactory
@@ -344,17 +345,18 @@ test('API-key provider card previews every pool key and switches the active one'
   assert.equal(textOf(options[1]).trim(), 'zai-team')
   assert.equal(nodes.filter(node => node.props?.['data-quota-section']).length, 1, 'the active key carries its quota panel')
   assert.equal(calls.snapshot[0].provider, 'zai-coding-cn', 'the active panel queries the official credential')
-  assert.equal(calls.snapshot[0].keyId, undefined, 'the active panel rides the route credential, not a pool key')
+  assert.equal(calls.snapshot[0].keyId, 'aaaa0001', 'the default preview names the active pool key')
   assert.equal(calls.snapshot[0].maxAgeMs, 300000)
 
   // Selecting the second key and expanding details mounts its own panel.
   chooseAccount(draw, 'pool', 'aaaa0002')
   nodes = flatten(draw())
-  nodes.find(node => node.props?.['data-pool-action'] === 'details').props.onClick()
   await settleLoop()
   nodes = flatten(draw())
-  assert.equal(nodes.filter(node => node.props?.['data-quota-section']).length, 2, 'the selected key previews its own quota')
-  assert.equal(calls.snapshot.at(-1).keyId, 'aaaa0002', 'the expanded panel names its pool key')
+  assert.equal(nodes.filter(node => node.props?.['data-quota-section']).length, 1, 'the selected key replaces the sole quota panel')
+  assert.equal(calls.snapshot.at(-1).keyId, 'aaaa0002', 'selection immediately previews its pool key')
+  assert.equal(calls.setActive.length, 0, 'preview never switches the live account')
+  assert.equal(calls.history.at(-1).keyId, 'aaaa0002')
 
   // Renaming the selected key goes through the pool remote.
   startRename(draw, 'pool', 'aaaa0002', 'zai-team-2')
@@ -382,13 +384,13 @@ test('API-key provider card previews every pool key and switches the active one'
     preventDefault: () => {}, stopPropagation() {},
     currentTarget: { elements: { name: { value: 'zai-new' }, value: { value: 'sk-synthetic-new' } }, reset: () => {} },
   })
-  assert.deepEqual(calls.add.map(call => ({ ...call })), [{ provider: 'zai-coding-cn', name: 'zai-new', value: 'sk-synthetic-new' }])
+  assert.deepEqual(calls.add.map(call => ({ ...call })), [{ provider: 'zai-coding-cn', name: 'zai-new', value: 'sk-synthetic-new', accountType: 'personal' }])
 
   // Selecting back the first key, then removing it.
   nodes = flatten(draw())
   chooseAccount(draw, 'pool', 'aaaa0001')
   nodes = flatten(draw())
-  nodes.find(node => node.props?.['data-pool-action'] === 'remove').props.onClick()
+  await dropAccount(draw, 'pool', 'aaaa0001')
   await settleLoop()
   assert.deepEqual(calls.drop.map(call => ({ ...call })), [{ id: 'aaaa0001' }])
   assert.ok(!JSON.stringify(flatten(draw())).includes('sk-synthetic'), 'no rendered node ever carries a secret value')
@@ -463,13 +465,13 @@ test('Codex account pool lists sources, imports, switches, renames and drops', a
   assert.equal(calls.setActive.length, 0, 'import does not switch accounts')
   nodes = flatten(draw())
   assert.match(nodes.find(node => node.props?.['data-codex-notice']).props.children, /当前账号未切换/u)
-  assert.ok(calls.snapshot.filter(request => !request.grantId).length >= 2, 'import refreshes the main quota panel')
+  assert.equal(calls.snapshot.at(-1).grantId, '99aabbcc', 'import selects its preview without activating it')
+  assert.equal(nodes.filter(node => node.props?.['data-quota-section']).length, 1)
   assert.deepEqual(openPicker(draw, 'codex').filter(node => node.props?.['data-codex-option']).map(option => option.props['data-codex-option']), ['ab12cd34', 'ef567890', '99aabbcc'])
 
   // Per-account quota preview passes the grant id.
   chooseAccount(draw, 'codex', 'ef567890')
   nodes = flatten(draw())
-  nodes.find(node => node.props?.['data-codex-action'] === 'details').props.onClick()
   await settleLoop()
   assert.equal(calls.snapshot.at(-1).grantId, 'ef567890', 'the per-account panel previews that grant')
   assert.equal(calls.snapshot.at(-1).provider, 'openai-codex')
@@ -496,12 +498,12 @@ test('Codex account pool lists sources, imports, switches, renames and drops', a
   nodes = flatten(draw())
   assert.match(nodes.find(node => node.props?.['data-codex-current']).props.children, /qq@example.test/u, 'the current line follows the switch')
   assert.equal(nodes.find(node => node.props?.['data-quota-email']).props.children, 'qq@example.test', 'the main quota panel follows the switch, not only the pool')
-  assert.equal(calls.snapshot.filter(request => !request.grantId).at(-1).maxAgeMs, 0, 'mutation refresh bypasses the quota cache')
+  assert.equal(calls.snapshot.at(-1).maxAgeMs, 0, 'mutation refresh bypasses the quota cache')
   assert.ok(!nodes.some(node => node.props?.['data-codex-operation-error']), 'awaited successful actions do not show generic errors')
   // Removing the imported account drops its record.
   chooseAccount(draw, 'codex', '99aabbcc')
   nodes = flatten(draw())
-  nodes.find(node => node.props?.['data-codex-action'] === 'remove').props.onClick()
+  await dropAccount(draw, 'codex', '99aabbcc')
   await settleLoop()
   assert.deepEqual(calls.drop.map(call => ({ ...call })), [{ id: '99aabbcc' }])
   assert.ok(!JSON.stringify(flatten(draw())).includes('access'), 'no rendered node carries grant material')
@@ -731,17 +733,19 @@ test('account pickers share custom row editing, fixed toolbar slots and busy gua
     let nodes = flatten(draw())
     const toolbar = () => flatten(draw()).find(node => node.props?.[`data-${kind}-toolbar`])
     const signature = () => flatten(toolbar()).filter(node => node.type === 'button').map(node => node.props[`data-${kind}-action`])
-    assert.deepEqual(signature(), ['use', 'details', 'remove'])
+    assert.deepEqual(signature(), ['use'])
     assert.equal(flatten(toolbar()).find(node => node.props?.[`data-${kind}-action`] === 'use').props.disabled, true)
-    if (kind === 'codex') assert.equal(flatten(toolbar()).find(node => node.props?.['data-codex-action'] === 'remove').props.disabled, true)
     assert.equal(nodes.find(node => node.props?.[`data-${kind}-select`]).type, 'button')
     assert.equal(nodes.filter(node => node.type === 'select' && node.props.name !== 'source').length, 0, 'account selection is never a native select')
     nodes = openPicker(draw, kind)
+    assert.equal(nodes.find(node => node.props?.['data-account-drop'] === 'first').props.disabled, kind === 'codex', 'only Codex protects the current account from deletion')
     const row = nodes.find(node => node.props?.['data-account-row'] === 'second')
     const icon = flatten(row).find(node => node.props?.['data-account-rename'])
     assert.match(icon.props['aria-label'], /Second account/u)
     assert.equal(icon.props.title, icon.props['aria-label'])
-    assert.ok(flatten(row).find(node => node.props?.['data-account-choice']), 'rename and choose are siblings in the row')
+    assert.ok(flatten(row).find(node => node.props?.['data-account-choice']), 'rename and choose are siblings in the row'
+    )
+    assert.ok(flatten(row).find(node => node.props?.['data-account-drop']), 'delete is a sibling icon in the same row')
     for (const button of nodes.filter(node => node.type === 'button')) assert.equal(flatten(button.props.children).filter(node => node.type === 'button').length, 0, 'no nested buttons')
     let stopped = 0
     icon.props.onClick({ stopPropagation() { stopped++ } })
@@ -767,7 +771,7 @@ test('account pickers share custom row editing, fixed toolbar slots and busy gua
     assert.ok(!flatten(draw()).some(node => node.props?.[`data-${kind}-rename`]))
     assert.equal(renames.length, 1, 'cancel makes no RPC')
     chooseAccount(draw, kind, 'second')
-    assert.deepEqual(signature(), ['use', 'details', 'remove'], 'selection never inserts/removes toolbar buttons')
+    assert.deepEqual(signature(), ['use'], 'selection never inserts/removes toolbar buttons')
     assert.equal(flatten(toolbar()).find(node => node.props?.[`data-${kind}-action`] === 'use').props.disabled, false)
   }
 })
@@ -988,6 +992,306 @@ test('directory native-picker fallback is limited to the declared unavailable ca
   assert.match(textOf(nodes.find(node => node.props?.['data-directory-error'])), /synthetic host read denied/u)
 })
 
+test('one selected preview waits for pool loading and ignores stale selection responses without activation', async () => {
+  for (const kind of ['pool', 'codex']) {
+    let finishList
+    const entries = [{ id: 'active', name: 'Active', active: true }, { id: 'preview', name: 'Preview', active: false }]
+    const calls = { snapshot: [], history: [], use: [] }
+    let finishPreview
+    const service = { ...(kind === 'pool' ? emptyPool() : emptyAccounts()), list: () => new Promise(resolve => { finishList = resolve }), setActive: async request => { calls.use.push(request); return { ok: true, value: {} } } }
+    const quota = {
+      snapshot: async request => {
+        calls.snapshot.push(request)
+        const id = kind === 'pool' ? request.keyId : request.grantId
+        if (id === 'preview') return await new Promise(resolve => { finishPreview = resolve })
+        return { ok: true, value: { status: 'ok', snapshot: { email: `${id || 'official'}@example.test`, windows: [] } } }
+      },
+      history: async request => { calls.history.push(request); return { ok: true, value: { points: [] } } },
+    }
+    const { draw } = await mountPanel(quota, kind === 'pool' ? { provider: 'kimi-coding', pool: service, keyConfigured: true } : { accounts: service })
+    openManagement(flatten(draw())); await settleDraw(draw)
+    assert.equal(calls.snapshot.length, 0, 'official fallback cannot probe while list is unresolved')
+    finishList({ ok: true, value: { entries } }); await settleDraw(draw)
+    let nodes = flatten(draw())
+    assert.equal(calls.snapshot.length, 1, 'loaded active entry triggers exactly one probe')
+    assert.equal(nodes.filter(node => node.props?.['data-quota-section']).length, 1)
+    assert.equal(nodes.find(node => node.props?.['data-quota-email']).props.children, 'active@example.test')
+    chooseAccount(draw, kind, 'preview'); await settleDraw(draw)
+    nodes = flatten(draw())
+    assert.equal(nodes.filter(node => node.props?.['data-quota-section']).length, 1)
+    assert.ok(!nodes.some(node => node.props?.['data-quota-email']), 'old account identity is not carried into pending preview')
+    assert.equal(kind === 'pool' ? calls.snapshot.at(-1).keyId : calls.snapshot.at(-1).grantId, 'preview')
+    chooseAccount(draw, kind, 'active'); await settleDraw(draw)
+    finishPreview({ ok: true, value: { status: 'ok', snapshot: { email: 'stale-preview@example.test', windows: [] } } }); await settleDraw(draw)
+    nodes = flatten(draw())
+    assert.equal(nodes.find(node => node.props?.['data-quota-email']).props.children, 'active@example.test')
+    assert.equal(calls.use.length, 0)
+    assert.ok(calls.history.every(request => (kind === 'pool' ? request.keyId : request.grantId) === 'active'), 'unmounted stale snapshots cannot launch another account history probe')
+    const bar = nodes.find(node => node.props?.[`data-${kind === 'pool' ? 'pool' : 'codex'}-bar`])
+    assert.equal(bar.props.children.length, 2, 'picker and the sole use action are direct siblings in one bar')
+    assert.deepEqual(flatten(bar).filter(node => node.props?.[`data-${kind}-action`]).map(node => node.props[`data-${kind}-action`]), ['use'])
+  }
+})
+
+test('empty loaded pools fall back to one official quota only when a credential is configured', async () => {
+  for (const provider of ['openai-codex', 'kimi-coding']) {
+    const requests = []
+    const quota = { ...uiQuota(), snapshot: async request => { requests.push(request); return { ok: true, value: { status: 'ok', snapshot: { windows: [] } } } } }
+    const { draw } = await mountPanel(quota, { provider, keyConfigured: true })
+    openManagement(flatten(draw())); await settleDraw(draw)
+    assert.equal(requests.length, 1)
+    assert.equal(requests[0].keyId, undefined)
+    assert.equal(requests[0].grantId, undefined)
+    assert.equal(flatten(draw()).filter(node => node.props?.['data-quota-section']).length, 1)
+  }
+  const requests = []
+  const quota = { ...uiQuota(), snapshot: async request => { requests.push(request); return { ok: true, value: {} } } }
+  const { draw } = await mountPanel(quota, { provider: 'kimi-coding', keyConfigured: false })
+  openManagement(flatten(draw())); await settleDraw(draw)
+  assert.equal(requests.length, 0)
+})
+
+test('row deletion is scoped, guarded, error-visible, and falls back after deleting the selected account', async () => {
+  for (const kind of ['pool', 'codex']) {
+    const entries = [{ id: 'active', name: 'Active', active: true }, { id: 'selected', name: 'Selected' }, { id: 'other', name: 'Other' }]
+    const calls = { drop: [], use: [] }
+    let finishDrop
+    const service = { ...(kind === 'pool' ? emptyPool() : emptyAccounts()), list: async () => ({ ok: true, value: { entries: [...entries] } }), drop: async request => { calls.drop.push(request); return await new Promise(resolve => { finishDrop = resolve }) }, setActive: async request => { calls.use.push(request); return { ok: true, value: {} } } }
+    const { draw } = await mountPanel(uiQuota(), kind === 'pool' ? { provider: 'kimi-coding', pool: service, keyConfigured: true } : { accounts: service })
+    openManagement(flatten(draw())); await settleDraw(draw)
+    chooseAccount(draw, kind, 'selected'); await settleDraw(draw)
+    let nodes = openPicker(draw, kind)
+    const otherRow = nodes.find(node => node.props?.['data-account-row'] === 'other')
+    assert.equal(flatten(otherRow).filter(node => node.type === 'button').length, 3, 'choice, rename and drop are sibling row actions')
+    const drop = flatten(otherRow).find(node => node.props?.['data-account-drop']).props.onClick
+    let stopped = 0
+    const pending = drop({ stopPropagation() { stopped++ } })
+    await drop({ stopPropagation() { stopped++ } })
+    assert.equal(calls.drop.length, 1)
+    assert.equal(stopped, 2)
+    nodes = flatten(draw())
+    assert.ok(nodes.filter(node => node.props?.['data-account-drop']).every(node => node.props.disabled))
+    assert.equal(nodes.find(node => node.props?.[`data-${kind}-select`]).props['data-selected-id'], 'selected', 'drop never selects the clicked row')
+    finishDrop({ ok: false, error: { message: 'synthetic remove denied' } }); await pending
+    nodes = flatten(draw())
+    assert.match(textOf(nodes.find(node => node.props?.role === 'alert')), /(?:删除失败|删除账号失败).*synthetic remove denied/u)
+    assert.equal(calls.use.length, 0)
+    nodes = openPicker(draw, kind)
+    const removeSelected = nodes.find(node => node.props?.['data-account-drop'] === 'selected').props.onClick
+    const removing = removeSelected({ stopPropagation() {} })
+    entries.splice(1, 1)
+    finishDrop({ ok: true, value: {} }); await removing; await settleDraw(draw)
+    nodes = flatten(draw())
+    assert.equal(nodes.find(node => node.props?.[`data-${kind}-select`]).props['data-selected-id'], 'active', 'deleted selected item falls back to active before first')
+    assert.equal(nodes.filter(node => node.props?.['data-quota-section']).length, 1)
+    nodes = openPicker(draw, kind)
+    const currentDrop = nodes.find(node => node.props?.['data-account-drop'] === 'active')
+    assert.equal(currentDrop.props.disabled, kind === 'codex')
+    if (kind === 'codex') {
+      await currentDrop.props.onClick({ stopPropagation() {} })
+      assert.equal(calls.drop.length, 2, 'stale callbacks cannot delete the current Codex grant')
+    }
+    assert.equal(calls.use.length, 0)
+  }
+})
+
+test('explicit unsupported quota and Xiaomi omit all history RPCs, polling, controls and graphs', async () => {
+  for (const provider of ['xiaomi-token-plan-cn', 'zai']) {
+    const before = vmTimerId
+    let history = 0
+    const quota = { snapshot: async () => ({ ok: true, value: { status: 'unsupported', message: 'synthetic console-only quota', helpUrl: 'https://example.test/console', lastSnapshot: { windows: [{ kind: 'weekly', usedPercent: 20 }] } } }), history: async () => { history++; return { ok: true, value: { points: [] } } } }
+    const { draw } = await mountPanel(quota, { provider, keyConfigured: true })
+    openManagement(flatten(draw())); await settleDraw(draw)
+    let nodes = flatten(draw())
+    assert.equal(history, 0)
+    assert.equal(vmTimers.filter(timer => timer.id > before && timer.interval).length, 0, 'unsupported has no history interval at all')
+    assert.ok(nodes.find(node => node.props?.['data-quota-help']))
+    assert.match(textOf(nodes.find(node => node.props?.['data-quota-notice'])), /synthetic console-only quota/u)
+    assert.ok(!nodes.some(node => node.props?.['data-quota-range'] || node.props?.['data-quota-spark-axis'] || node.props?.['data-quota-spark-empty'] || node.props?.['data-quota-window']))
+    assert.ok(!textOf(nodes).includes('用量历史'))
+    nodes.find(node => node.props?.['data-quota-refresh']).props.onClick(); await settleDraw(draw)
+    assert.equal(history, 0)
+  }
+  for (const status of ['network', 'signed-out', 'expired']) {
+    let history = 0
+    const quota = { snapshot: async () => ({ ok: true, value: { status } }), history: async () => { history++; return { ok: true, value: { points: [] } } } }
+    const { draw } = await mountPanel(quota, { provider: 'zai', keyConfigured: true })
+    openManagement(flatten(draw())); await settleDraw(draw)
+    assert.equal(history, 1, `${status} is recoverable, not unsupported`)
+    assert.equal(flatten(draw()).filter(node => node.props?.['data-quota-range']).length, 3)
+  }
+})
+
+test('cadence gaps use elapsed seconds and per-point sampling metadata rather than hour buckets or current config', async () => {
+  let points = []
+  let currentCadence = 86400
+  const quota = { ...uiQuota(), history: async () => ({ ok: true, value: { points, sampleIntervalSeconds: currentCadence } }) }
+  const { draw } = await mountPanel(quota)
+  openManagement(flatten(draw())); await settleDraw(draw)
+  const hourBase = Math.floor(TEST_NOW / 3600) * 3600 - 12 * 3600
+  for (const scenario of [
+    { minutes: 63, expected: 1 }, { minutes: 64, expected: 1 }, { minutes: 91, expected: 0 }, { minutes: 120, expected: 0 },
+    { minutes: 120, interval: 7200, expected: 1 }, { minutes: 179, interval: 7200, expected: 1 }, { minutes: 181, interval: 7200, expected: 0 },
+    { minutes: 64, interval: 60, expected: 1 }, { minutes: 91, interval: 60, expected: 0 },
+  ]) {
+    const first = hourBase + 59 * 60
+    points = [{ ts: first, used: { weekly: 10 } }, { ts: first + scenario.minutes * 60, used: { weekly: 20 } }].map(point => ({ ...point, ...(scenario.interval ? { sampleIntervalSeconds: scenario.interval } : {}) }))
+    let nodes = flatten(draw())
+    nodes.find(node => node.props?.['data-quota-refresh']).props.onClick(); await settleDraw(draw)
+    nodes = flatten(draw())
+    assert.equal(nodes.filter(node => node.type === 'polyline').length, scenario.expected, `${scenario.minutes}min elapsed at ${scenario.interval || 'legacy'} cadence`)
+    assert.equal(nodes.find(node => node.props?.['data-quota-spark-wrap']).props['data-quota-sample-interval'], currentCadence, 'current config is preserved atomically as metadata, not applied retroactively to old samples')
+    assert.equal(nodes.filter(node => node.props?.['data-quota-spark-point']).length, scenario.expected ? 0 : 2)
+  }
+})
+
+test('ZAI regional account forms isolate personal and per-account team scopes without leaking to other providers', async () => {
+  for (const provider of ['zai', 'zai-coding-cn']) {
+    const requests = []
+    const pool = { ...emptyPool(), add: async request => { requests.push(request); return { ok: true, value: {} } }, list: async () => ({ ok: true, value: { entries: [{ id: 'team', name: 'Work', accountType: 'team', organization: 'org-safe', project: 'project-safe', active: true }] } }) }
+    const { draw } = await mountPanel(uiQuota(), { provider, pool, keyConfigured: true })
+    openManagement(flatten(draw())); await settleDraw(draw)
+    let nodes = flatten(draw())
+    assert.equal(nodes.filter(node => node.props?.['data-pool-type']).length, 2)
+    assert.equal(nodes.find(node => node.props?.['data-pool-type'] === 'personal').props['aria-pressed'], true)
+    assert.ok(!nodes.some(node => node.type === 'input' && ['organization', 'project'].includes(node.props.name)))
+    nodes.find(node => node.props?.['data-pool-type'] === 'team').props.onClick(); nodes = flatten(draw())
+    for (const name of ['organization', 'project']) assert.equal(nodes.find(node => node.type === 'input' && node.props.name === name).props.required, true)
+    let form = nodes.find(node => node.props?.['data-pool-add'])
+    await form.props.onSubmit(formEvent({ name: { value: 'Team' }, value: { value: 'synthetic-secret' }, organization: { value: ' org-id ' }, project: { value: '' } }))
+    assert.equal(requests.length, 0, 'team scope pair is validated even outside native HTML form validation')
+    nodes = flatten(draw())
+    assert.match(textOf(nodes.find(node => node.props?.role === 'alert')), /Organization ID.*Project ID/u)
+    form = nodes.find(node => node.props?.['data-pool-add'])
+    await form.props.onSubmit(formEvent({ name: { value: 'Team' }, value: { value: 'synthetic-secret' }, organization: { value: ' org-id ' }, project: { value: ' project-id ' } }))
+    assert.deepEqual({ ...requests.at(-1) }, { provider, name: 'Team', value: 'synthetic-secret', accountType: 'team', organization: 'org-id', project: 'project-id' })
+    nodes = flatten(draw()); nodes.find(node => node.props?.['data-pool-type'] === 'personal').props.onClick(); nodes = flatten(draw())
+    assert.ok(!nodes.some(node => node.type === 'input' && ['organization', 'project'].includes(node.props.name)))
+    await nodes.find(node => node.props?.['data-pool-add']).props.onSubmit(formEvent({ name: { value: 'Personal' }, value: { value: 'synthetic-secret' }, organization: { value: 'stale-org' }, project: { value: 'stale-project' } }))
+    assert.deepEqual({ ...requests.at(-1) }, { provider, name: 'Personal', value: 'synthetic-secret', accountType: 'personal' })
+    nodes = openPicker(draw, 'pool')
+    assert.match(textOf(nodes.find(node => node.props?.['data-account-team'])), /团队账号/u)
+    assert.ok(!JSON.stringify(nodes).includes('synthetic-secret'))
+  }
+  const requests = []
+  const pool = { ...emptyPool(), add: async request => { requests.push(request); return { ok: true, value: {} } } }
+  const { draw } = await mountPanel(uiQuota(), { provider: 'kimi-coding', pool })
+  openManagement(flatten(draw())); await settleDraw(draw)
+  const nodes = flatten(draw())
+  assert.ok(!nodes.some(node => node.props?.['data-pool-account-type']))
+  await nodes.find(node => node.props?.['data-pool-add']).props.onSubmit(formEvent({ name: { value: 'Generic' }, value: { value: 'synthetic-secret' }, organization: { value: 'unused' }, project: { value: 'unused' } }))
+  assert.deepEqual({ ...requests.at(-1) }, { provider: 'kimi-coding', name: 'Generic', value: 'synthetic-secret' })
+})
+
+test('account-name placeholders are generic in both locales and retain real existing account names', async () => {
+  const source = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  assert.ok(!/zai-gsj|vickie|codex-gth/iu.test(source), 'plugin copy has no personal examples or obsolete hardcoded launcher labels')
+  for (const locale of ['zh', 'en']) {
+    const pool = { ...emptyPool(), list: async () => ({ ok: true, value: { entries: [{ id: 'real', name: 'Existing user-provided name', active: true }] } }) }
+    const { draw } = await mountPanel(uiQuota(), { provider: 'zai', pool, locale })
+    openManagement(flatten(draw())); await settleDraw(draw)
+    const nodes = flatten(draw())
+    assert.equal(nodes.find(node => node.type === 'input' && node.props.name === 'name').props.placeholder, locale === 'zh' ? '例如：工作账号' : 'e.g. Work account')
+    assert.ok(textOf(nodes).includes('Existing user-provided name'))
+    const codex = await mountPanel(uiQuota(), { locale })
+    openManagement(flatten(codex.draw())); await settleDraw(codex.draw)
+    const add = openAdd(codex.draw, 'web')
+    assert.equal(add.find(node => node.type === 'input' && node.props.name === 'accountName').props.placeholder, locale === 'zh' ? '例如：工作账号' : 'e.g. Work account')
+  }
+})
+
+test('history exposes fixed 0/50/100 percent ticks and bounded key values at their actual sample coordinates', async () => {
+  const values = [5, 90, 20, 2, 55, 45]
+  const points = values.map((value, index) => ({ ts: TEST_NOW - (6 - index) * 86400, used: { weekly: value }, plan: index < 4 ? 'pro' : 'plus', sampleIntervalSeconds: 86400 }))
+  const quota = { ...uiQuota(), history: async () => ({ ok: true, value: { points } }) }
+  const { draw } = await mountPanel(quota)
+  openManagement(flatten(draw())); await settleDraw(draw)
+  const nodes = flatten(draw())
+  const ticks = nodes.filter(node => node.props?.['data-quota-spark-y-tick'])
+  assert.deepEqual(ticks.map(node => node.props.children), ['100%', '50%', '0%'])
+  assert.deepEqual(ticks.map(node => node.props['data-quota-spark-y-tick']), ['100', '50', '0'])
+  const labels = nodes.filter(node => node.props?.['data-quota-spark-value'])
+  assert.equal(labels.length, 6, 'first/last, min/max, reset and plan change are a bounded selection, not every sample')
+  assert.deepEqual(labels.map(node => node.props.children), ['5%', '45%', '2%', '90%', '20%', '55%'])
+  assert.deepEqual(labels.map(node => node.props['data-quota-spark-value-reason']), ['first', 'last', 'min', 'max', 'reset', 'plan'])
+  for (const label of labels) {
+    assert.equal(label.type, 'span', 'sample values are visible content rather than hover-only titles')
+    const point = points.find(point => point.ts === label.props['data-quota-spark-value'])
+    const expectedX = ((point.ts - (TEST_NOW - 168 * 3600)) / (168 * 3600)) * 100
+    assert.equal(label.props['data-quota-spark-value-x'], expectedX)
+    assert.equal(label.props.style.left, `${expectedX}%`)
+    const leader = nodes.find(node => node.props?.['data-quota-spark-label-leader'] === point.ts)
+    assert.ok(Math.abs(Number(leader.props.x1) - expectedX) < .001)
+    assert.equal(leader.props.x1, leader.props.x2, 'labels never create a horizontal line across unknown history')
+    const dot = nodes.find(node => node.props?.['data-quota-spark-label-point'] === point.ts)
+    assert.equal(dot.props.cx, leader.props.x1)
+    const pointY = Number(dot.props.cy) * 3
+    const labelTop = parseFloat(label.props.style.top)
+    assert.ok(pointY < labelTop - 3 || pointY > labelTop + 19, 'value box leaves its actual sample marker visible')
+  }
+  assert.ok(labels[0].props['data-quota-spark-value-x'] > 0, 'first observed value is not pasted onto the empty window boundary')
+  assert.ok(labels[1].props['data-quota-spark-value-x'] < 100, 'last observed value is not extrapolated to now')
+  assert.equal(nodes.filter(node => node.props?.['data-quota-spark-cap']).length, 0)
+})
+
+test('dense right-edge histories keep endpoint values readable without overlapping labels on narrow 7d and 30d charts', async () => {
+  const points = Array.from({ length: 137 }, (_, index) => ({ ts: TEST_NOW - 1800 + index * 10, used: { weekly: index === 30 ? 98 : index === 100 ? 1 : 40 + index % 10 }, plan: index < 70 ? 'pro' : 'plus' }))
+  const quota = { ...uiQuota(), history: async () => ({ ok: true, value: { points } }) }
+  for (const chartWidth of [120, 240, 480]) {
+    const { draw } = await mountPanel(quota, { chartWidth })
+    openManagement(flatten(draw())); await settleDraw(draw)
+    for (const range of [168, 720]) {
+      let nodes = flatten(draw())
+      nodes.find(node => node.props?.['data-quota-range'] === String(range)).props.onClick(); await settleDraw(draw)
+      nodes = flatten(draw())
+      const labels = nodes.filter(node => node.props?.['data-quota-spark-value'])
+      assert.ok(labels.length >= 2 && labels.length <= 6, 'labels remain bounded even with 137 samples')
+      assert.equal(labels[0].props['data-quota-spark-value'], points[0].ts)
+      assert.equal(labels[1].props['data-quota-spark-value'], points.at(-1).ts, 'first and last samples win collision priority')
+      assert.equal(labels[0].props.children, '40%')
+      assert.equal(labels[1].props.children, '46%')
+      const boxes = labels.map(label => {
+        const x = label.props['data-quota-spark-value-x'] * chartWidth / 100
+        assert.equal(label.props.style.left, `${label.props['data-quota-spark-value-x']}%`, 'every label anchor remains at its real time position')
+        const left = x + parseFloat(label.props.style.marginLeft)
+        const width = parseFloat(label.props.style.width)
+        const top = parseFloat(label.props.style.top)
+        assert.ok(left >= -.001 && left + width <= chartWidth + .001, 'edge-aligned label stays inside the measured plot')
+        assert.ok(top >= 0 && top + 16 <= 72, 'vertical lanes stay within the readable plot height')
+        return { left, right: left + width, top, bottom: top + 16 }
+      })
+      for (let left = 0; left < boxes.length; left++) for (let right = left + 1; right < boxes.length; right++) {
+        const a = boxes[left], b = boxes[right]
+        assert.ok(a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top, 'numeric value boxes never collide')
+      }
+      assert.equal(nodes.filter(node => node.props?.['data-quota-spark-hit']).length, 137, 'unlabelled samples retain full hover detail')
+      assert.equal(nodes.filter(node => node.props?.['data-quota-spark-y-tick']).length, 3)
+    }
+  }
+})
+
+test('single-point and empty histories keep fixed axes without fabricated endpoint labels or lines', async () => {
+  let points = [{ ts: TEST_NOW - 90 * 60, used: { weekly: 37 } }]
+  const quota = { ...uiQuota(), history: async () => ({ ok: true, value: { points } }) }
+  const { draw } = await mountPanel(quota)
+  openManagement(flatten(draw())); await settleDraw(draw)
+  let nodes = flatten(draw())
+  const labels = nodes.filter(node => node.props?.['data-quota-spark-value'])
+  assert.equal(labels.length, 1, 'one observation gets one visible label, not two invented endpoints')
+  assert.equal(labels[0].props.children, '37%')
+  assert.equal(labels[0].props['data-quota-spark-value'], points[0].ts)
+  assert.equal(nodes.filter(node => node.props?.['data-quota-spark-point']).length, 1)
+  assert.equal(nodes.filter(node => node.type === 'polyline' || node.type === 'polygon').length, 0)
+  points = [{ ts: TEST_NOW + 60, used: { weekly: 98 } }, { ts: TEST_NOW - 169 * 3600, used: { weekly: 99 } }]
+  nodes.find(node => node.props?.['data-quota-refresh']).props.onClick(); await settleDraw(draw)
+  nodes = flatten(draw())
+  assert.equal(nodes.filter(node => node.props?.['data-quota-spark-value']).length, 0, 'future and out-of-window samples cannot invent visible values')
+  assert.equal(nodes.filter(node => node.props?.['data-quota-spark-label-point']).length, 0)
+  assert.equal(nodes.filter(node => node.props?.['data-quota-spark-y-tick']).length, 3, 'fixed scale remains available without data')
+  assert.equal(nodes.filter(node => node.props?.['data-quota-spark-tick']).length, 3)
+  assert.ok(nodes.find(node => node.props?.['data-quota-spark-empty']))
+})
+
 function openPicker(draw, kind) {
   let nodes = flatten(draw())
   const trigger = nodes.find(node => node.props?.[`data-${kind}-select`])
@@ -1016,4 +1320,9 @@ function openAdd(draw, method = 'web', name = '') {
   nodes = flatten(draw())
   nodes.find(node => node.type === 'input' && node.props.name === 'accountName').props.onChange({ target: { value: name } })
   return flatten(draw())
+}
+
+async function dropAccount(draw, kind, id) {
+  const nodes = openPicker(draw, kind)
+  return await nodes.find(node => node.props?.['data-account-drop'] === id).props.onClick({ stopPropagation() {} })
 }
