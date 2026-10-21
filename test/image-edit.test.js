@@ -4,7 +4,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { SystemPrompt } from '@deepseek-ai/dsh-system-prompt'
 import { ToolRuntime } from '@deepseek-ai/dsh-tools'
 import { createScope } from '@deepseek-ai/dsh-scope'
-import { createImageTool, createImageEditTool, imageResultContent } from '../lib/images.js'
+import { createImageTool, imageResultContent } from '../lib/images.js'
 import { generateImageBytes, IMAGE_ROUTES, normalizeImageRequest } from '../lib/image-providers.js'
 
 const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 0])
@@ -28,18 +28,19 @@ function fixture({ config = {}, fsError, validationError, generate } = {}) {
     async saveFile({ name }) { calls.push(['file']); return { attachmentId: 'sha256:' + 'b'.repeat(64), name, bytes: png.length } },
   }
   const ctx = { attachments, credentials: {}, get: key => key === 'fs' ? fs : undefined }
-  const tool = createImageEditTool(ctx, () => config, { codexAuth: auth, generate: generate ?? (async (_ctx, provider, body, s, options) => {
+  const tool = createImageTool(ctx, 'openai-codex', () => config, { codexAuth: auth, generate: generate ?? (async (_ctx, provider, body, s, options) => {
     posts.push({ provider, body, options }); s.throwIfAborted(); return { data: png, mediaType: 'image/png' }
   }) })
   const exec = { callId: 'offline-edit', signal: signal(), agent: { session: { header: { cwd: '/execution/workspace' } } } }
   return { ctx, fs, attachments, tool, exec, calls, posts }
 }
 
-test('independent edit schema requires references and documents no fallback or exact-likeness guarantee', () => {
+test('unified Codex schema makes references optional and documents no fallback or exact-likeness guarantee', () => {
   const { tool } = fixture()
-  assert.equal(tool.name, 'image_edit_codex')
-  assert.ok(tool.parameters.required.includes('imagePaths'))
-  assert.match(tool.description, /Never falls back to text-only generation/u)
+  assert.equal(tool.name, 'image_generate_codex')
+  assert.deepEqual(tool.parameters.required, ['prompt'])
+  assert.ok(tool.parameters.properties.imagePaths)
+  assert.match(tool.description, /without falling back to text-only generation/u)
   assert.match(tool.description, /Do not promise unchanged pixels or perfect likeness/u)
   assert.ok(tool.timeoutMs > 600000)
 })
@@ -51,7 +52,7 @@ test('generation and editing share common parameters, output shape and delivery 
     assert.equal(f.tool.parameters.properties[key].type, generation.parameters.properties[key].type)
     if (key !== 'prompt') assert.deepEqual(f.tool.parameters.properties[key], generation.parameters.properties[key])
   }
-  assert.deepEqual(Object.keys(generation.parameters.properties), ['prompt', 'aspectRatio', 'background'])
+  assert.deepEqual(Object.keys(generation.parameters.properties), ['prompt', 'imagePaths', 'aspectRatio', 'background'])
   assert.deepEqual(Object.keys(f.tool.parameters.properties), ['prompt', 'imagePaths', 'aspectRatio', 'background'])
   assert.deepEqual(f.tool.output.schema, generation.output.schema)
   const generated = await generation.execute({ prompt: 'new image' }, f.exec)
@@ -65,8 +66,10 @@ test('generation and editing share common parameters, output shape and delivery 
     assert.match(content[0].text, /Output:.*Preview may be normalized/u)
     assert.equal(generation.output.presentationMeta({}, value).kind, 'provider-hub-image')
   }
-  // A reference argument on the generation schema is an error, never ignored.
-  await assert.rejects(generation.execute({ prompt: 'edit', imagePaths: ['source.png'] }, f.exec), error => error.name === 'ToolArgsError')
+  // Old or misspelled reference arguments are rejected, never silently ignored.
+  for (const key of ['referencedImagePaths', 'images', 'imagePath']) {
+    await assert.rejects(generation.execute({ prompt: 'edit', [key]: ['source.png'] }, f.exec), error => error.name === 'ToolArgsError')
+  }
 })
 
 test('editing reads ordered bounded local bytes through the FS capability before one request', async () => {
@@ -79,14 +82,14 @@ test('editing reads ordered bounded local bytes through the FS capability before
   assert.deepEqual(calls.filter(row => row[0] === 'resolve'), [['resolve', 'source.png', '/execution/workspace'], ['resolve', 'light.png', '/execution/workspace']])
   assert.equal(calls.filter(row => row[0] === 'validate').length, 3)
   assert.equal(result.operation, 'edit'); assert.equal(result.referenceCount, 2)
-  assert.match(result.original.name, /^openai-codex-edit-/u)
+  assert.match(result.original.name, /^openai-codex-image-/u)
   assert.doesNotMatch(JSON.stringify(result), /base64|source.png|light.png/u)
-  assert.match(imageResultContent(result)[0].text, /Edited one image using 2 input images/u)
+  assert.match(imageResultContent(result)[0].text, /Generated one image using 2 reference images/u)
   assert.match(imageResultContent(result)[0].text, /Output:/u)
 })
 
-test('missing, empty, over-count, non-path and remote reference inputs cannot become text-only generation', async () => {
-  for (const paths of [undefined, [], Array(6).fill('source.png'), [null], [''], ['\0'], ['https://example.org/a.png'], ['file:///private/a.png'], ['data:image/png;base64,abc']]) {
+test('explicit undefined, empty, over-count, non-path and remote references cannot become text-only generation', async () => {
+  for (const paths of [undefined, null, false, 'source.png', [], Array(6).fill('source.png'), [null], [''], ['\0'], ['https://example.org/a.png'], ['file:///private/a.png'], ['data:image/png;base64,abc']]) {
     const f = fixture()
     await assert.rejects(f.tool.execute({ prompt: 'edit', imagePaths: paths }, f.exec), error => error.name === 'ToolArgsError' || ['IMAGE_INVALID_INPUT', 'IMAGE_REFERENCE_INVALID'].includes(error.code))
     assert.equal(f.posts.length, 0)
@@ -144,7 +147,7 @@ test('caller FS isolation overrides the global FS and never falls back to host a
     const agent = { ...f.exec.agent, ctx: isolated }
     scope = createScope(root, agent)
     root.tools.register(f.tool)
-    const result = await root.tools.execute({ name: 'image_edit_codex', callId: 'isolated-edit', arguments: args(), agent, signal: signal() })
+    const result = await root.tools.execute({ name: 'image_generate_codex', callId: 'isolated-edit', arguments: args(), agent, signal: signal() })
     assert.equal(result.isError, true)
     assert.equal(result.error.info.code, 'IMAGE_REFERENCE_INVALID')
     assert.equal(denied, 1); assert.equal(f.posts.length, 0); assert.deepEqual(f.calls, [])
@@ -153,6 +156,37 @@ test('caller FS isolation overrides the global FS and never falls back to host a
     await assert.rejects(f.tool.execute(args(), absent), error => error.code === 'IMAGE_CONFIG')
     assert.deepEqual(f.calls, [])
   } finally { await scope?.dispose(); await root.fiber.dispose() }
+})
+
+test('the same Codex tool selects generations or edits solely from imagePaths presence', async () => {
+  const f = fixture()
+  const requests = []
+  const fetcher = async (url, request) => {
+    requests.push({ url, body: JSON.parse(request.body) })
+    return Response.json({ data: [{ b64_json: png.toString('base64') }] })
+  }
+  const tool = createImageTool(f.ctx, 'openai-codex', () => ({}), { fetcher, codexAuth: auth })
+  const text = await tool.execute({ prompt: 'new image' }, f.exec)
+  assert.equal(text.operation, 'generate'); assert.equal(text.referenceCount, 0)
+  assert.deepEqual(f.calls.filter(row => row[0] === 'read'), [])
+  assert.equal(requests[0].url, IMAGE_ROUTES['openai-codex'].endpoint)
+  assert.equal(requests[0].body.images, undefined)
+  const withImages = await tool.execute(args(), f.exec)
+  assert.equal(withImages.operation, 'edit'); assert.equal(withImages.referenceCount, 2)
+  assert.equal(requests.length, 2, 'one POST per accepted call, never both endpoints')
+  assert.equal(requests[1].url, IMAGE_ROUTES['openai-codex'].editEndpoint)
+  assert.deepEqual(requests[1].body.images, [png, reference].map(data => ({ image_url: `data:image/png;base64,${data.toString('base64')}` })))
+  await assert.rejects(tool.execute({ prompt: 'bad reference', imagePaths: [] }, f.exec), error => error.code === 'IMAGE_INVALID_INPUT')
+  assert.equal(requests.length, 2, 'invalid images cannot issue a text-only fallback')
+})
+
+test('Z.AI tools remain text-only and reject reference parameters before dispatch', async () => {
+  const f = fixture()
+  for (const provider of ['zai', 'zai-cn']) {
+    const tool = createImageTool(f.ctx, provider, () => ({ imageProviders: [provider] }), { generate: async () => assert.fail('must not dispatch') })
+    assert.equal(tool.parameters.properties.imagePaths, undefined)
+    await assert.rejects(tool.execute(args(), f.exec), error => error.name === 'ToolArgsError')
+  }
 })
 
 test('edit transport sends exactly one authenticated JSON edits POST, retaining generation routing', async () => {
@@ -185,21 +219,46 @@ test('edit transport loss is uncertain, sanitized and never retried', async () =
   assert.equal(calls, 1)
 })
 
-test('real Host registry validates edit input/output and respects edit-specific deny guards', async () => {
+test('unified reference calls use the same nested PTC dispatch and file forwarding', async () => {
+  const root = new Context(); let scope
+  try {
+    await root.plugin(SystemPrompt, {})
+    await root.plugin(ToolRuntime, { mode: 'both' })
+    const f = fixture(); f.exec.agent.session.append = () => {}
+    scope = createScope(root, f.exec.agent)
+    root.tools.register(f.tool)
+    root.provide('ptcRuntime', {
+      language: 'typescript', timeout: { defaultMs: 120000, maxMs: 600000 }, resolve: spec => spec,
+      run: async spec => ({ logs: [], value: await spec.bindings[0].functions.image_generate_codex(args()) }),
+    })
+    const result = await root.tools.execute({ name: 'run_code', callId: 'offline-unified-ptc', arguments: { description: 'offline reference generation', code: 'mock', timeoutMs: 400000 }, agent: f.exec.agent, signal: signal() })
+    assert.equal(result.isError, false)
+    assert.equal(f.posts.length, 1)
+    assert.equal(f.posts[0].options.operation, 'edit')
+    assert.equal(result.additionalContexts.length, 1)
+    assert.deepEqual(result.additionalContexts[0].content.map(row => row.type), ['text', 'file'])
+    assert.match(result.additionalContexts[0].content[0].text, /using 2 reference images/u)
+    const legacy = await root.tools.execute({ name: 'image_edit_codex', callId: 'offline-removed-tool', arguments: args(), agent: f.exec.agent, signal: signal() })
+    assert.equal(legacy.error.info.code, 'UNKNOWN_TOOL')
+    assert.equal(f.posts.length, 1)
+  } finally { await scope?.dispose(); await root.fiber.dispose() }
+})
+
+test('real Host registry validates unified reference input/output and respects the shared deny guard', async () => {
   const root = new Context(); let scope
   try {
     await root.plugin(SystemPrompt, {})
     await root.plugin(ToolRuntime, { mode: 'native' })
     const f = fixture(); scope = createScope(root, f.exec.agent)
     root.tools.register(f.tool)
-    const invoke = arguments_ => root.tools.execute({ name: 'image_edit_codex', callId: 'offline-edit-registry', arguments: arguments_, agent: f.exec.agent, signal: signal() })
-    assert.equal((await invoke({ prompt: 'missing refs' })).isError, true)
+    const invoke = arguments_ => root.tools.execute({ name: 'image_generate_codex', callId: 'offline-edit-registry', arguments: arguments_, agent: f.exec.agent, signal: signal() })
+    assert.equal((await invoke({ prompt: 'invalid refs', imagePaths: [] })).isError, true)
     assert.equal(f.posts.length, 0)
     const result = await invoke(args())
     assert.equal(result.isError, false)
     assert.equal(result.value.operation, 'edit')
     assert.deepEqual(result.content.map(row => row.type), ['text', 'file'])
-    const unguard = root.tools.guard(exec => exec.name === 'image_edit_codex' ? 'Edit forbidden' : undefined)
+    const unguard = root.tools.guard(exec => exec.name === 'image_generate_codex' ? 'Edit forbidden' : undefined)
     assert.equal((await invoke(args())).isError, true)
     assert.equal(f.posts.length, 1)
     unguard()

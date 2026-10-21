@@ -41,17 +41,18 @@ function rejectsCode(code) {
   return error => { assert.ok(error instanceof HarnessError); assert.equal(error.code, code); assert.equal(error.cause, undefined); return true }
 }
 
-test('image tool declares one generation only, stable outer budget and no binary output path/edit inputs', () => {
+test('Codex tool declares unified generation with optional references and a stable outer budget', () => {
   const { tool } = fixture()
   assert.equal(tool.name, 'image_generate_codex')
   assert.ok(tool.timeoutMs > 600000)
   assert.equal(tool.isConcurrencySafe({ prompt: 'mock' }), true)
-  assert.deepEqual(Object.keys(tool.parameters.properties), ['prompt', 'aspectRatio', 'background'])
+  assert.deepEqual(Object.keys(tool.parameters.properties), ['prompt', 'imagePaths', 'aspectRatio', 'background'])
+  assert.deepEqual(tool.parameters.required, ['prompt'])
   assert.deepEqual(tool.parameters.properties.aspectRatio.enum, ['auto', '1:1', '3:2', '2:3', '16:9', '9:16'])
   assert.match(tool.parameters.properties.aspectRatio.description, /Resolution cannot be requested/u)
   assert.match(tool.description, /alternatives, not an automatic batch/u)
-  assert.match(tool.description, /does not edit/u)
-  assert.match(tool.description, /Use image_edit_codex with imagePaths/u)
+  assert.match(tool.description, /Omit imagePaths for text-to-image/u)
+  assert.match(tool.description, /without falling back to text-only generation/u)
   assert.match(tool.description, /run_code.*timeoutMs/u)
 })
 

@@ -6,7 +6,7 @@ import { access, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { pathToFileURL } from 'node:url'
-import { createImageTool, createImageEditTool, installImageTools } from '../lib/images.js'
+import { createImageTool, installImageTools } from '../lib/images.js'
 import { ImageError } from '../lib/image-auth.js'
 
 // As in the search runtime suite, test the actual public Host packages without
@@ -163,10 +163,13 @@ test('actual Cordis registration survives repeated volatile selections and unloa
       root.emit(emitter, 'loader/volatile-update', [['imageProviders']])
     }
     const names = () => root.tools.schemas().map(tool => tool.name).sort()
-    assert.deepEqual(names(), ['image_edit_codex', 'image_generate_codex'])
+    assert.deepEqual(names(), ['image_generate_codex'])
+    assert.equal(root.tools.get('image_edit_codex'), undefined, 'the old model-facing edit name is not registered')
+    assert.deepEqual(root.tools.schemas()[0].parameters.required, ['prompt'])
+    assert.ok(root.tools.schemas()[0].parameters.properties.imagePaths, 'the registered generation schema includes optional references')
     for (let n = 0; n < 20; n++) {
       setConfig({ imageProviders: ['openai-codex', 'zai', 'zai-cn', 'zai'] }); emitUpdate()
-      assert.deepEqual(names(), ['image_edit_codex', 'image_generate_codex', 'image_generate_zai', 'image_generate_zai_cn'])
+      assert.deepEqual(names(), ['image_generate_codex', 'image_generate_zai', 'image_generate_zai_cn'])
       setConfig({ imageProviders: [] }); emitUpdate()
       assert.deepEqual(names(), [])
     }
@@ -345,7 +348,7 @@ test('actual LocalAttachmentStore fully validates image and keeps metadata-rich 
     await writeFile(join(resolvedDirectory, 'reference.png'), original)
     await writeFile(join(resolvedDirectory, 'corrupt.png'), original.subarray(0, 40))
     let edits = 0
-    const editTool = createImageEditTool({ ...ctx, get: key => key === 'fs' ? root.fs : undefined }, () => ({}), { generate: async (_ctx, _provider, body, _signal, options) => {
+    const editTool = createImageTool({ ...ctx, get: key => key === 'fs' ? root.fs : undefined }, 'openai-codex', () => ({}), { generate: async (_ctx, _provider, body, _signal, options) => {
       edits++
       assert.equal(options.operation, 'edit')
       assert.equal(body.images[0].image_url, `data:image/png;base64,${original.toString('base64')}`)
@@ -365,7 +368,7 @@ test('actual LocalAttachmentStore fully validates image and keeps metadata-rich 
         saveFile: () => assert.fail('over-pixel reference must not be persisted'),
       },
     }
-    const pixelTool = createImageEditTool(pixelLimited, () => ({}), { generate: async () => { edits++; assert.fail('over-pixel reference must not reach transport') } })
+    const pixelTool = createImageTool(pixelLimited, 'openai-codex', () => ({}), { generate: async () => { edits++; assert.fail('over-pixel reference must not reach transport') } })
     await assert.rejects(pixelTool.execute({ prompt: 'offline pixel limit', imagePaths: ['reference.png'] }, exec), error => error.code === 'IMAGE_REFERENCE_INVALID')
     assert.equal(edits, 1)
   } finally {
