@@ -78,6 +78,19 @@ npm_config_auto_install_peers=false dsh plugin --profile web add "${PACK_DIR:?}/
 
 仍使用原生 `queries[]`，不添加 `query` 或 `provider` 参数，也不改变工具 schema、展示、结果限制或 `web_fetch` 后端。组合由用户通过全局设置选择，而不是由模型逐次改变提供方参数。
 
+## 源码开发与 CI
+
+开发依赖将用于测试的 DSH Host 包精确固定为与当前部署相同的整套 `0.2.1-alpha.1`（Cordis 为 `4.0.5-alpha.1`），并提交完整锁文件。对外的 `peerDependencies` 兼容范围保持不变；开发依赖不会随插件安装到用户 profile，也不要求升级正在运行的 Host。
+
+```sh
+npm ci --ignore-scripts
+npm ls --all
+DSH_TEST_RUNTIME_ROOT="$PWD" npm run check
+npm run pack:check
+```
+
+CI 同样显式使用工作区里的 Host 包，包含官方 credentials-local 集成测试，不依赖全局 DSH 或跳过测试。不要使用 `--force` / `--legacy-peer-deps` 绕过版本冲突。此前不完整的锁文件保留 `alpha.2` 核心包，却让新增的 attachment peer 自动选择 `rc.2`，两者要求不同版本的 `dsh-brand`，因而触发 `ERESOLVE`；固定开发依赖并改用 `npm ci` 避免再次混装。
+
 ## 全局配置与持久化
 
 - 保存通过 DSH 原生 `configForms` / settings 服务写入当前 profile patch，namespace 为 Host entry id `dsh-provider-hub`。

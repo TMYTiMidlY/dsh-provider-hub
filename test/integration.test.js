@@ -26,8 +26,30 @@ test('package pins a private volatile-capable Schema builder without bundling du
     '@deepseek-ai/dsh-typert-protocol': '>=0.2.1-alpha.1',
     '@deepseek-ai/dsh-web': '>=0.2.1-alpha.1',
   })
-  assert.deepEqual(manifest.devDependencies, { '@deepseek-ai/dsh-client-ui-primitives': '0.2.1-alpha.1' }, 'real-model settings tests need the browser library in CI')
+  assert.equal(manifest.devDependencies['@deepseek-ai/dsh-client-ui-primitives'], '0.2.1-alpha.1', 'real-model settings tests need the browser library in CI')
+  // Broad consumer peer ranges must not make clean CI mix alpha and rc Host
+  // packages. Exact dev pins select one compatible graph without shipping it.
+  for (const name of Object.keys(manifest.peerDependencies)) {
+    const expected = name === '@deepseek-ai/cordis' ? '4.0.5-alpha.1'
+      : name === '@earendil-works/pi-ai' ? '0.87.1' : '0.2.1-alpha.1'
+    assert.equal(manifest.devDependencies[name], expected, `${name} has a coherent CI version`)
+  }
+  for (const name of ['dsh-attachment-local', 'dsh-credentials-local', 'dsh-fs-local', 'dsh-scope', 'dsh-system-prompt', 'dsh-tool-call-timeout-policy']) {
+    assert.equal(manifest.devDependencies[`@deepseek-ai/${name}`], '0.2.1-alpha.1', `${name} is an explicit test dependency`)
+  }
   assert.equal(manifest.exports['./images'], './lib/images.js')
+})
+
+test('the lockfile tracks all runtime peers and explicit development dependencies', () => {
+  const lock = JSON.parse(readFileSync(new URL('../package-lock.json', import.meta.url)))
+  assert.equal(lock.lockfileVersion, 3)
+  assert.equal(lock.packages[''].version, manifest.version)
+  for (const field of ['dependencies', 'peerDependencies', 'devDependencies']) {
+    assert.deepEqual(lock.packages[''][field], manifest[field], `${field} must not drift from the lockfile`)
+  }
+  for (const [name, version] of Object.entries(manifest.devDependencies)) {
+    assert.equal(lock.packages[`node_modules/${name}`]?.version, version, `${name} is locked to the tested version`)
+  }
 })
 
 test('the native settings schema exposes every hub UI field for live saves', () => {

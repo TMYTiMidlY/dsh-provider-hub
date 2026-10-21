@@ -7,11 +7,17 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      # Exercise the pinned local Host packages, including credentials-local;
+      # never pick up an unrelated global DSH installation or skip that test.
+      DSH_TEST_RUNTIME_ROOT: ${{ github.workspace }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm install --ignore-scripts
-      - run: npm test
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm ls --all
       - run: npm run check
+      - run: npm run pack:check
