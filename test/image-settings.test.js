@@ -1,26 +1,28 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile, access } from 'node:fs/promises'
+import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { pathToFileURL } from 'node:url'
 import vm from 'node:vm'
 
-// The published React bundle imports CSS, so Node cannot import its root. Run
-// the exact Host-owned, self-contained form regions in a VM instead. No copied
-// staging algorithm: the actual Host model does the draft/fencing work. Snapshot
-// publication is a test boundary: the published browser store imports dev-only
-// zustand/immer dependencies not installed in the CLI Host. Do not install them.
-// As in runtime.test.js, a missing explicit runtime or changed contract fails
-// this layer rather than silently skipping it.
+// rc2's CLI does not install this browser-only package at its root: the Web
+// frontend embeds it from its exact-version devDependency. Point
+// DSH_TEST_PRIMITIVES_ROOT at the matching published package extracted via
+// `npm pack --ignore-scripts` when it is not present in the runtime tree. Never
+// install it into the live Host, fall back to alpha peers, or skip this suite.
+// The package imports CSS/React, so execute its unchanged form regions in a VM;
+// only snapshot publication and React rendering are boundary stand-ins, never
+// the real model's staging, saving, revision fencing or discard algorithms.
 const explicitRuntimeRoot = process.env.DSH_TEST_RUNTIME_ROOT
-const runtimePath = join(explicitRuntimeRoot ?? '/usr/local/lib/node_modules/@deepseek-ai/dsh', 'node_modules/@deepseek-ai')
-let usePeerImports = false
-try { await access(join(runtimePath, 'dsh-client-ui-primitives/lib/index.js')) } catch (error) {
-  if (explicitRuntimeRoot !== undefined || !['ENOENT', 'ENOTDIR'].includes(error.code)) throw error
-  usePeerImports = true
-}
-const runtimeUrl = name => usePeerImports ? import.meta.resolve(`@deepseek-ai/${name}`) : pathToFileURL(join(runtimePath, name, 'lib/index.js')).href
-const primitiveSource = await readFile(new URL(runtimeUrl('dsh-client-ui-primitives')), 'utf8')
+assert.ok(explicitRuntimeRoot, 'Set DSH_TEST_RUNTIME_ROOT to the rc2 Host installation')
+const runtimeVersion = JSON.parse(await readFile(join(explicitRuntimeRoot, 'node_modules/@deepseek-ai/dsh-tools/package.json'), 'utf8')).version
+assert.equal(runtimeVersion, '0.2.1-rc.2', 'this contract suite targets the current rc2 public surface')
+const primitiveRoot = process.env.DSH_TEST_PRIMITIVES_ROOT ?? join(explicitRuntimeRoot, 'node_modules/@deepseek-ai/dsh-client-ui-primitives')
+const primitiveManifest = JSON.parse(await readFile(join(primitiveRoot, 'package.json'), 'utf8').catch(error => {
+  throw new Error('Matching rc2 browser primitives are required: set DSH_TEST_PRIMITIVES_ROOT to an extracted @deepseek-ai/dsh-client-ui-primitives@0.2.1-rc.2 npm pack (no install)', { cause: error })
+}))
+assert.equal(primitiveManifest.name, '@deepseek-ai/dsh-client-ui-primitives')
+assert.equal(primitiveManifest.version, runtimeVersion, 'browser form code must match the Host release, never an old alpha dependency')
+const primitiveSource = await readFile(join(primitiveRoot, 'lib/index.js'), 'utf8')
 function createSnapshotStore(initial) {
   let snapshot = initial
   const listeners = new Set()
@@ -153,7 +155,10 @@ async function withClient(t, config = {}) {
   const slots = {
     inject: (_name, callback) => callback(),
     register: (seat, render) => {
-      if (seat.name === 'settings.models.provider-card') return () => {}
+      if (['settings.models.provider-card', 'settings.models.provider-actions'].includes(seat.name)) {
+        assert.equal(seat.key, 'llm-pi-ai', 'Models extensions keep their adapter namespace')
+        return () => {}
+      }
       assert.equal(seat.name, 'plugins.bundle.config', 'the merged bundle owns one keyed config page')
       assert.equal(seat.key, NAMESPACE)
       seatEntry = { seat, render }
@@ -293,8 +298,10 @@ test('revision conflict preserves native drafts and never silently rebases or ov
   switchImage(fixture, ['zai'])
   fixture.scope.behavior = commit => (fixture.scope.replace({ revision: 99, user: { imageProviders: ['zai-cn'] } }), Promise.resolve(false))
   const rendered = fixture.render()
-  await rendered.form.props.onSave()
+  rendered.form.props.onSave()
+  await settled()
   fixture.scope.behavior = undefined
+  assert.equal(fixture.render().form.props.state.failed, true, 'the real model marks a revision refusal as failed')
   assert.deepEqual(selected(fixture.render()).sort(), ['zai'], 'conflict keeps the local draft')
   assert.deepEqual(fixture.scope.getSnapshot().user.imageProviders, ['zai-cn'], 'the newer Host value wins remotely')
 })
@@ -304,10 +311,18 @@ test('native transport failure preserves draft and uses fixed form copy rather t
   switchImage(fixture, ['zai'])
   fixture.scope.behavior = () => Promise.reject(new Error('SYNTHETIC_TRANSPORT_SECRET'))
   const rendered = fixture.render()
-  await rendered.form.props.onSave()
+  rendered.form.props.onSave()
+  await settled()
   fixture.scope.behavior = undefined
-  assert.deepEqual(selected(fixture.render()), ['zai'], 'draft survives the failure')
-  assert.doesNotMatch(JSON.stringify(rendered.form.props.state), /SYNTHETIC_TRANSPORT_SECRET/u)
+  const failed = fixture.render()
+  assert.deepEqual(selected(failed), ['zai'], 'draft survives the failure')
+  assert.equal(failed.form.props.state.failed, true)
+  const frame = mountFrame(failed.form.props)
+  try {
+    assert.ok(nodesOf(frame.tree).some(node => node.props?.role === 'status' && node.props.children === failed.form.props.labels.saveFailed), 'real SettingsForm renders fixed failure copy')
+    assert.doesNotMatch(JSON.stringify(frame.tree), /SYNTHETIC_TRANSPORT_SECRET/u)
+  } finally { frame.unmount() }
+  assert.doesNotMatch(JSON.stringify(failed.form.props.state), /SYNTHETIC_TRANSPORT_SECRET/u)
 })
 
 test('native read-only, in-flight, invalid, and unavailable states keep their guards and drafts', async t => {
@@ -317,12 +332,12 @@ test('native read-only, in-flight, invalid, and unavailable states keep their gu
   assert.ok(imageIds.every(id => imageSwitchOf(rendered, id)?.props.disabled), 'read-only disables image switches')
   fixture.scope.replace({ writable: true, status: 'ready' })
   switchImage(fixture, ['zai'])
-  fixture.scope.behavior = () => new Promise(() => {})
-  const pending = fixture.render().form.props.onSave()
+  let finishWrite
+  fixture.scope.behavior = commit => new Promise(resolve => { finishWrite = () => resolve(commit()) })
+  fixture.render().form.props.onSave()
   await settled()
   rendered = fixture.render()
   assert.ok(imageIds.every(id => imageSwitchOf(rendered, id)?.props.disabled), 'in-flight save disables image switches')
-  void pending
   const invalid = fixture.render()
   assert.equal(invalid.form.props.state.imageProviders.invalid, false)
   fixture.scope.replace({ status: 'unavailable' })
@@ -331,8 +346,27 @@ test('native read-only, in-flight, invalid, and unavailable states keep their gu
   try {
     assert.ok(nodesOf(frame.tree).some(node => node.props?.role === 'status' && /未加载|unavailable/u.test(String(node.props.children))), 'unserved namespace shows the fixed unavailable line')
   } finally { frame.unmount() }
-  assert.equal(fixture.scope.writes.length, 1, 'only the still-pending in-flight write was attempted')
+  assert.equal(fixture.scope.writes.length, 1, 'only one in-flight write was attempted')
+  finishWrite()
+  await settled()
+  assert.equal(fixture.render().form.props.state.saving, false, 'the test drains its actual Host save rather than abandoning a pending promise')
   assert.deepEqual(fixture.scope.getSnapshot().user.imageProviders ?? ['openai-codex'], ['openai-codex'], 'the fenced write never landed')
+})
+
+test('rc2 form validation blocks malformed image drafts without dropping or writing them', async t => {
+  const fixture = await withClient(t)
+  fixture.render().props.edit('imageProviders', '["not-a-provider"]')
+  const invalid = fixture.render()
+  assert.equal(invalid.form.props.state.invalid, true)
+  assert.equal(invalid.form.props.state.imageProviders.invalid, true)
+  invalid.form.props.onSave()
+  await settled()
+  assert.equal(fixture.scope.writes.length, 0)
+  assert.equal(fixture.render().form.props.state.imageProviders.text, '["not-a-provider"]', 'invalid local text remains available for correction')
+  const frame = mountFrame(invalid.form.props)
+  try {
+    assert.ok(nodesOf(frame.tree).some(node => node.type === 'button' && node.props.disabled === true && node.props.children === invalid.form.props.labels.save), 'the actual form disables Save for invalid drafts')
+  } finally { frame.unmount() }
 })
 
 test('image section renders inside the single package card with three independent switches and locale copy', async t => {

@@ -12,28 +12,50 @@ test('package pins a private volatile-capable Schema builder without bundling du
   // A peer would resolve to a pre-existing profile-root Schema, which may lack
   // volatile support. A direct exact dependency gives this plugin its own
   // builder while runtime services continue to come from the Host.
-  assert.deepEqual(manifest.dependencies, { '@deepseek-ai/schemastery': '3.18.5-alpha.1' })
+  assert.deepEqual(manifest.dependencies, { '@deepseek-ai/schemastery': '~3.18.5' })
   assert.equal(Object.hasOwn(manifest.peerDependencies, '@deepseek-ai/schemastery'), false)
   assert.deepEqual(manifest.peerDependencies, {
-    '@deepseek-ai/cordis': '>=4.0.5-alpha.1',
-    '@deepseek-ai/dsh-tool-web': '>=0.2.1-alpha.1',
-    '@deepseek-ai/dsh-authorization': '>=0.2.1-alpha.1',
-    '@deepseek-ai/dsh-credentials': '>=0.2.1-alpha.1',
-    '@deepseek-ai/dsh-tools': '>=0.2.1-alpha.1',
-    '@deepseek-ai/dsh-attachment': '>=0.2.1-alpha.1',
-    '@deepseek-ai/dsh-llm': '>=0.2.1-alpha.1',
-    '@earendil-works/pi-ai': '0.87.1',
-    '@deepseek-ai/dsh-typert-protocol': '>=0.2.1-alpha.1',
-    '@deepseek-ai/dsh-web': '>=0.2.1-alpha.1',
+    '@deepseek-ai/cordis': '~4.0.5',
+    '@deepseek-ai/dsh-tool-web': '0.2.1-rc.2',
+    '@deepseek-ai/dsh-authorization': '0.2.1-rc.2',
+    '@deepseek-ai/dsh-credentials': '0.2.1-rc.2',
+    '@deepseek-ai/dsh-tools': '0.2.1-rc.2',
+    '@deepseek-ai/dsh-attachment': '0.2.1-rc.2',
+    '@deepseek-ai/dsh-llm': '0.2.1-rc.2',
+    '@earendil-works/pi-ai': '1.3.0',
+    '@deepseek-ai/dsh-typert-protocol': '0.2.1-rc.2',
+    '@deepseek-ai/dsh-web': '0.2.1-rc.2',
   })
-  assert.deepEqual(manifest.devDependencies, { '@deepseek-ai/dsh-client-ui-primitives': '0.2.1-alpha.1' }, 'real-model settings tests need the browser library in CI')
+  assert.equal(manifest.devDependencies['@deepseek-ai/dsh-client-ui-primitives'], '0.2.1-rc.2', 'real-model settings tests need the matching browser library in CI')
+  for (const name of Object.keys(manifest.peerDependencies)) {
+    const expected = name === '@deepseek-ai/cordis' ? '4.0.5'
+      : name === '@earendil-works/pi-ai' ? '1.3.0' : '0.2.1-rc.2'
+    assert.equal(manifest.devDependencies[name], expected, `${name} has a coherent CI version`)
+  }
+  for (const name of ['dsh-attachment-local', 'dsh-credentials-local', 'dsh-fs-local', 'dsh-scope', 'dsh-system-prompt', 'dsh-tool-call-timeout-policy']) {
+    assert.equal(manifest.devDependencies[`@deepseek-ai/${name}`], '0.2.1-rc.2', `${name} is an explicit test dependency`)
+  }
+  assert.equal(manifest.devDependencies['@deepseek-ai/cordis-plugin-loader'], '1.0.6')
   assert.equal(manifest.exports['./images'], './lib/images.js')
 })
 
+test('the lockfile tracks all runtime peers and explicit development dependencies', () => {
+  const lock = JSON.parse(readFileSync(new URL('../package-lock.json', import.meta.url)))
+  assert.equal(lock.lockfileVersion, 3)
+  assert.equal(lock.packages[''].version, manifest.version)
+  for (const field of ['dependencies', 'peerDependencies', 'devDependencies']) {
+    assert.deepEqual(lock.packages[''][field], manifest[field], `${field} must not drift from the lockfile`)
+  }
+  for (const [name, version] of Object.entries(manifest.devDependencies)) {
+    assert.equal(lock.packages[`node_modules/${name}`]?.version, version, `${name} is locked to the tested version`)
+  }
+})
+
 test('the native settings schema exposes every hub UI field for live saves', () => {
-  for (const field of ['searchProviders', 'imageProviders', 'imageTimeoutMs', 'quotaRecord', 'quotaIntervalMinutes', 'quotaHistoryDays', 'zaiTeamOrganization', 'zaiTeamProject']) {
+  for (const field of ['searchProviders', 'searchMaxResults', 'imageProviders', 'imageTimeoutMs', 'quotaRecord', 'quotaIntervalMinutes', 'quotaHistoryDays', 'zaiTeamOrganization', 'zaiTeamProject']) {
     assert.equal(Config.dict[field].meta.volatile, true, `${field} must be editable via configForms`)
   }
+  assert.equal(Config.dict.searchMaxResults.meta.default, 0)
   assert.equal(Config.dict.quotaRecord.meta.default, true)
   assert.equal(Config.dict.quotaIntervalMinutes.meta.default, 60)
   assert.equal(Config.dict.quotaHistoryDays.meta.default, 180)
@@ -83,6 +105,7 @@ test('Typert metadata declares every endpoint the browser mounts, host and remot
 test('client stages independent OpenAI/ZAI switches and only Codex OAuth without owning the settings scope', async () => {
   let registered
   let loginRender
+  let actionsRender
   let settingsRender
   let settingsSeat
   let saved = 0
@@ -117,10 +140,11 @@ test('client stages independent OpenAI/ZAI switches and only Codex OAuth without
       assert.equal(fields[1].parse('["deepseek-official"]'), undefined)
       assert.equal(JSON.stringify(fields.slice(2).map(field => field.field)), JSON.stringify(['searchMaxResults', 'quotaRecord', 'quotaIntervalMinutes', 'quotaHistoryDays', 'zaiTeamOrganization', 'zaiTeamProject']))
       assert.equal(fields[2].format(200), '200')
-      assert.equal(fields[2].format('nonsense'), '200')
+      assert.equal(fields[2].format('nonsense'), '0')
       assert.equal(JSON.stringify(fields[2].parse('45')), JSON.stringify({ kind: 'set', value: 45 }))
       assert.equal(JSON.stringify(fields[2].parse('')), JSON.stringify({ kind: 'clear' }), 'an empty draft clears the override back to the composition value')
-      assert.equal(fields[2].parse('0'), undefined, 'source cap below schema minimum is staged as invalid')
+      assert.equal(JSON.stringify(fields[2].parse('0')), JSON.stringify({ kind: 'set', value: 0 }), 'zero explicitly returns all received sources')
+      assert.equal(fields[2].parse('-1'), undefined)
       assert.equal(fields[2].parse('1001'), undefined)
       assert.equal(fields[3].format(false), 'false')
       assert.equal(fields[3].format(undefined), 'true')
@@ -173,7 +197,12 @@ test('client stages independent OpenAI/ZAI switches and only Codex OAuth without
     register: (seat, callback) => {
       assert.notEqual(seat.name, 'plugins.item', 'community settings must not add or replace an Official item')
       if (seat.name === 'plugins.bundle.config') { settingsSeat = seat; settingsRender = callback }
-      else { assert.equal(seat.name, 'settings.models.provider-card'); assert.equal(seat.key, 'llm-pi-ai'); loginRender = callback }
+      else {
+        assert.ok(['settings.models.provider-card', 'settings.models.provider-actions'].includes(seat.name))
+        assert.equal(seat.key, 'llm-pi-ai')
+        if (seat.name === 'settings.models.provider-card') loginRender = callback
+        else actionsRender = callback
+      }
       return () => {}
     },
   }
@@ -205,17 +234,33 @@ test('client stages independent OpenAI/ZAI switches and only Codex OAuth without
     const card = loginRender({ provider: { provider } })
     assert.equal(expand(card), null, `no hub card for routes without a quota surface (${provider})`)
   }
+  assert.equal(typeof actionsRender, 'function', 'the independent native action slot is registered')
+  const openManagement = provider => {
+    const props = { provider: { provider, settingsNs: 'llm-pi-ai' }, keyConfigured: true }
+    const initial = expand(loginRender(props))
+    const children = initial.props.children.flat()
+    assert.ok(!children.some(node => node?.props?.['data-provider-pool-panel']), 'management adds no panel before first click')
+    const entry = children.find(node => node?.props?.['data-provider-pool-entry'])
+    assert.equal(entry?.props?.className, 'provider-hub-pool-entry', 'rc.2 body slot owns the compact alignment wrapper')
+    const fallback = entry.props.children.flat().find(node => node?.props?.['data-provider-pool-fallback'])
+    assert.equal(fallback?.type, 'button', 'the wrapper contains one real accessible button')
+    assert.equal(entry.props.children.flat().filter(node => node?.type === 'button').length, 1)
+    const native = expand(actionsRender({ ...props, buttonClassName: 'official-secondary' }))
+    assert.equal(native.type, 'button')
+    assert.equal(native.props.className, 'official-secondary', 'native action uses the official button style')
+    native.props.onClick()
+    const panel = expand(loginRender(props)).props.children.flat().find(node => node?.props?.['data-provider-pool-panel'])
+    return expand(panel.props.children[0])
+  }
   for (const provider of ['zai', 'zai-coding-cn', 'kimi-coding', 'xiaomi-token-plan-cn']) {
-    const card = loginRender({ provider: { provider }, keyConfigured: true, pool: {}, quota: {} })
-    const section = expand(card)
+    const section = openManagement(provider)
     assert.equal(section.props['data-provider-hub-quota'], provider, 'API-key providers get the quota + key-pool card')
     const nodes = []
     const visit = node => { if (Array.isArray(node)) { node.forEach(visit); return } if (node && typeof node === 'object') { nodes.push(node); for (const child of node.props?.children ?? []) visit(child) } }
     visit(section)
     assert.ok(!nodes.some(node => node.props?.['data-login-action']), 'API-key providers never render an OAuth button')
   }
-  const card = loginRender({ provider: { provider: 'openai-codex' } })
-  assert.equal(expand(card).props['data-provider-hub-login'], 'openai-codex')
+  assert.equal(openManagement('openai-codex').props['data-provider-hub-login'], 'openai-codex')
   assert.equal(settingsSeat.name, 'plugins.bundle.config')
   assert.equal(settingsSeat.key, manifest.name)
   assert.equal(settingsSeat.id, undefined, 'the form belongs to the installed bundle, not a separate official card')
@@ -285,17 +330,22 @@ test('client stages independent OpenAI/ZAI switches and only Codex OAuth without
 
 test('Host mounts native providers without shadowing any preset tool or prompt', () => {
   let plugins = 0
+  let imageMount
   const registered = []
   const hooks = []
   apply({
-    plugin: () => { plugins++ },
+    effect: () => () => {},
+    plugin: (definition, config) => { plugins++; if (definition.name === 'dsh-image-tools') imageMount = { definition, config } },
     on: (event, handler, options) => { hooks.push([event, options]); return () => {} },
     web: { registerSearchProvider: value => { registered.push(value) } },
     tools: { register: () => { throw new Error('Host must not register tools') } },
     systemPrompt: { section: () => { throw new Error('Host must not change preset prompts') } },
   }, { searchProviders: [], enabledProviders: PROVIDERS, timeoutMs: 60000, searchMaxResults: 200, quotaRecord: true, quotaIntervalMinutes: 60, quotaHistoryDays: 180 })
   assert.equal(plugins, 5, 'search login bridge, key pool, codex accounts, quota service and image tools mount together')
-  assert.deepEqual(hooks, [['internal/config', { global: true }], ['credentials/record-updated', undefined]], 'native config hook plus account preservation on official credential changes')
+  assert.ok(imageMount, 'the actual Hub mount uses the image child')
+  assert.equal(imageMount.definition.Config, undefined, 'already-validated live boxes must not enter a second raw-value schema')
+  assert.equal(imageMount.config, undefined, 'the child captures the parent live config instead of revalidating boxed values')
+  assert.deepEqual(hooks, [['internal/config', { global: true }], ['loader/volatile-update', undefined], ['internal/plugin', { global: true }], ['credentials/record-updated', undefined]], 'native limit lifecycle plus account preservation')
   assert.deepEqual(registered.map(provider => provider.id).sort(), [ROUTER_PROVIDER_ID, 'openai-codex', 'zai', 'google-zread'].sort())
   assert.ok(registered.every(provider => typeof provider.search === 'function' && typeof provider.available === 'function'))
 })

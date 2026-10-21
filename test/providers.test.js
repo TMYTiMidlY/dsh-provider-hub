@@ -196,7 +196,7 @@ test('fixed operational override is a single route with provenance, safe status 
   const ctx = officialContext({ available: () => true, search: async () => { throw new Error('fixed direct must not call official') } })
   const reader = createSearchProvider(ctx, () => config({ searchProviders: [], zreadEndpoint: 'https://reader.invalid/?url={url}' }), { googleZreadSearch: async (_ctx, _query, value) => { options = value; return outcome('reader') } }, 'google-zread')
   const result = await reader.search({ query: 'reader' })
-  assert.equal(options.maxResults, 8); assert.equal(options.endpoint, 'https://reader.invalid/?url={url}')
+  assert.equal(options.maxResults, Number.MAX_SAFE_INTEGER); assert.equal(options.endpoint, 'https://reader.invalid/?url={url}')
   assert.equal(result.sources[0].title, '[Google] Result reader'); assertNoRaw(result)
   const codex = createSearchProvider(ctx, () => config({ searchProviders: ['zai'] }), { codexSearch: async () => outcome('codex') }, 'openai-codex')
   assert.equal((await codex.search({ query: 'direct' })).sources[0].title, '[OpenAI] Result codex')

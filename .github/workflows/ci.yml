@@ -7,11 +7,19 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      # Use the coherent, pinned rc.2 development Host, including the real
+      # credentials-local and Loader suites; never depend on a global install.
+      DSH_TEST_RUNTIME_ROOT: ${{ github.workspace }}
+      DSH_TEST_PRIMITIVES_ROOT: ${{ github.workspace }}/node_modules/@deepseek-ai/dsh-client-ui-primitives
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm install --ignore-scripts
-      - run: npm test
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm ls --all
       - run: npm run check
+      - run: npm run pack:check
+      - run: git diff --exit-code -- package.json package-lock.json

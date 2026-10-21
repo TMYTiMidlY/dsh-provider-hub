@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { QuotaFormatError } from '../lib/quota-core.js'
-import { apiKeyAccount, parseKimiQuotaBody, parseZaiQuotaBody, quotaProvider, zaiTeamSelectors } from '../lib/quota-providers.js'
+import { apiKeyAccount, parseKimiQuotaBody, parseZaiQuotaBody, quotaProvider, quotaQueryScope, zaiTeamSelectors } from '../lib/quota-providers.js'
 import { KeyPool, KeyPoolService } from '../lib/key-pool.js'
 import { QuotaService } from '../lib/quota.js'
 
@@ -209,6 +209,40 @@ test('team scope carries the selectors while their absence explains the gap', as
   assert.equal(new URL(calls[1].url).searchParams.get('type'), '2')
   assert.equal(calls[1].headers['Bigmodel-Organization'], 'org_1')
   assert.equal(calls[1].headers['Bigmodel-Project'], 'proj_2')
+})
+
+test('both ZAI routes select explicit team or personal queries without inheriting global scope', () => {
+  const global = { zaiTeamOrganization: 'global_org', zaiTeamProject: 'global_project' }
+  for (const id of ['zai', 'zai-coding-cn']) {
+    const provider = quotaProvider(id)
+    const team = provider.requests({ access: 'synthetic-never-log', accountType: 'team', organization: ' org_local ', project: ' project_local ' }, global)
+    assert.equal(team.length, 1, 'explicit team never probes personal first')
+    assert.equal(new URL(team[0].url).searchParams.get('type'), '2')
+    assert.equal(team[0].headers['Bigmodel-Organization'], 'org_local')
+    assert.equal(team[0].headers['Bigmodel-Project'], 'project_local')
+    const personal = provider.requests({ access: 'synthetic-never-log', accountType: 'personal', organization: 'stale_org', project: 'stale_project' }, global)
+    assert.equal(personal.length, 1)
+    assert.equal(new URL(personal[0].url).searchParams.has('type'), false)
+    assert.equal(personal[0].headers['Bigmodel-Organization'], undefined)
+    assert.equal(personal[0].headers['Bigmodel-Project'], undefined)
+    const legacy = provider.requests({ access: 'synthetic-never-log' }, global)
+    assert.equal(legacy.length, 2, 'untyped legacy keys retain the global fallback')
+    assert.equal(legacy[1].headers['Bigmodel-Organization'], 'global_org')
+    assert.throws(() => provider.requests({ access: 'synthetic-never-log', accountType: 'team', organization: 'only_org' }, global), /project/u)
+    assert.throws(() => provider.requests({ access: 'synthetic-never-log', accountType: 'team', organization: 'bad\r\nheader', project: 'p' }), /HTTP-header-safe/u)
+  }
+})
+
+test('quota query scopes bind only normalized team selectors, never secrets', () => {
+  assert.equal(quotaQueryScope({}), 'personal')
+  assert.equal(quotaQueryScope({ accountType: 'personal', organization: 'unused', project: 'unused' }), 'personal')
+  const first = quotaQueryScope({ accountType: 'team', organization: ' org ', project: ' project ', access: 'synthetic-secret-one' })
+  assert.match(first, /^team-[a-f0-9]{64}$/u)
+  assert.equal(first, quotaQueryScope({ accountType: 'team', organization: 'org', project: 'project', access: 'synthetic-secret-two' }))
+  assert.notEqual(first, quotaQueryScope({ accountType: 'team', organization: 'org', project: 'other' }))
+  assert.notEqual(quotaQueryScope({ accountType: 'team', organization: 'ab', project: 'c' }), quotaQueryScope({ accountType: 'team', organization: 'a', project: 'bc' }))
+  assert.ok(!first.includes('synthetic-secret'))
+  assert.throws(() => quotaQueryScope({ accountType: 'team', organization: 'org' }), /project/u)
 })
 
 test('quota snapshot exposes the xiaomi console path instead of inventing numbers', async () => {
