@@ -11,6 +11,7 @@ function createHarness() {
   const root = { path: '#root', counters: new Map(), cursor: 0 }
   const stack = [root]
   let visited = new Set()
+  let effects = []
   const sameDeps = (left, right) => Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((value, index) => Object.is(value, right[index]))
   const hooks = () => {
     const frame = stack[stack.length - 1]
@@ -22,7 +23,15 @@ function createHarness() {
   const React = {
     createElement: (type, props, ...children) => {
       const merged = { ...props, children: children.length <= 1 ? children[0] : children }
-      if (typeof type !== 'function') return { type, props: merged }
+      if (typeof type !== 'function') {
+        const node = { type, props: merged }
+        if (props?.ref && typeof props.ref === 'object') props.ref.current = {
+          focus() { node.focused = (node.focused || 0) + 1 },
+          contains(target) { return flatten(node).includes(target) },
+          querySelectorAll() { return flatten(node).filter(child => child.props?.['data-account-choice']).map(child => child.props.ref?.current || { focus() { child.focused = (child.focused || 0) + 1 } }) },
+        }
+        return node
+      }
       const parent = stack[stack.length - 1]
       const identity = props?.key !== undefined ? `key:${props.key}` : `${type.name || 'anon'}:${parent.counters.get(type) ?? 0}`
       if (props?.key === undefined) parent.counters.set(type, (parent.counters.get(type) ?? 0) + 1)
@@ -47,7 +56,7 @@ function createHarness() {
         slot.cleanup?.()
         slot.ran = true
         slot.deps = deps
-        slot.cleanup = effect()
+        effects.push(() => { slot.cleanup = effect() })
       }
     },
     useCallback(fn, deps) {
@@ -58,8 +67,9 @@ function createHarness() {
     },
   }
   const render = factory => {
-    root.counters = new Map(); root.cursor = 0; visited = new Set()
+    root.counters = new Map(); root.cursor = 0; visited = new Set(); effects = []
     const tree = factory()
+    for (const effect of effects) effect()
     for (const [path, slots] of states) {
       if (!visited.has(path)) { for (const slot of slots) slot?.cleanup?.(); states.delete(path) }
     }
@@ -72,10 +82,13 @@ function createHarness() {
 // interval; real ones would keep the test process alive.
 const vmTimers = []
 let vmTimerId = 0
-function loadClient(React) {
+const TEST_NOW = 1791721950 + 12 * 3600
+function loadClient(React, now = TEST_NOW) {
   let registered
   vm.runInNewContext(readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8'), {
+    Date: class extends Date { constructor(...args) { super(...(args.length ? args : [now * 1000])) } static now() { return now * 1000 } },
     window: { __ModuleLoader__: { load: entry => { registered = entry } } },
+    AbortController,
     setInterval: fn => { const id = ++vmTimerId; vmTimers.push({ id, fn, interval: true }); return id },
     clearInterval: id => { const index = vmTimers.findIndex(timer => timer.id === id); if (index >= 0) vmTimers.splice(index, 1) },
     setTimeout: fn => { const id = ++vmTimerId; vmTimers.push({ id, fn, interval: false }); return id },
@@ -125,17 +138,18 @@ async function mountPanel(quota, options = {}) {
   const pool = options.pool ?? emptyPool()
   const accounts = options.accounts ?? emptyAccounts()
   const { React, render } = createHarness()
-  const clientCapture = {}
+  const clientCapture = { dependencies: [] }
   const plugin = loadClient(React)
   let cardFactory
-  const capture = { inject: (name, callback) => callback(), register: (seat, callback) => { cardFactory = callback } }
+  let actionsFactory
+  const capture = { inject: (name, callback) => callback(), register: (seat, callback) => { if (seat.name === 'settings.models.provider-card') cardFactory = callback; if (seat.name === 'settings.models.provider-actions') actionsFactory = callback } }
   const searchLogin = options.searchLogin ?? { list: async () => ({ ok: true, value: { entries: [{ key: 'llm-pi-ai/openai-codex', authorized: true, methods: [{ id: 'oauth', label: 'OAuth' }], inFlight: false }] } }) }
   const bundles = {}
   await plugin.apply({
     locale: {
       register: (ns, dictionaries) => { bundles[ns] = dictionaries; return () => {} },
       bind: ns => (key, params) => {
-        const template = bundles[ns]?.zh?.[key] ?? key
+        const template = bundles[ns]?.[options.locale || 'zh']?.[key] ?? key
         return params ? template.replace(/\{(\w+)\}/g, (match, name) => (name in params ? String(params[name]) : match)) : template
       },
     },
@@ -143,22 +157,23 @@ async function mountPanel(quota, options = {}) {
     configForms: { get: () => ({ getSnapshot: () => ({ state: 'unavailable' }), subscribe: () => () => {}, mutate: async () => { throw new Error('not served') } }), whileServed: () => () => {} },
     effect: callback => { callback(); return () => {} },
     remote: { $mount: async descriptor => { clientCapture.remote = descriptor; return async () => {} } },
-    inject: (_deps, callback) => { callback({ remote: { searchLogin, quota, keyPool: pool, codexAccounts: accounts }, slots: capture }); return Object.assign(Promise.resolve(), { dispose: async () => {} }) },
+    inject: (_deps, callback) => { clientCapture.dependencies.push(_deps); callback({ uiWorkspace: options.workspace, remote: { searchLogin, quota, keyPool: pool, codexAccounts: accounts }, slots: capture }); return Object.assign(Promise.resolve(), { dispose: async () => {} }) },
   })
   assert.ok(cardFactory, 'provider-card render captured')
-  const draw = () => render(() => cardFactory({ provider: { provider }, keyConfigured: options.keyConfigured ?? (provider === 'openai-codex') }))
-  return { draw, pool, accounts, remoteDescriptor: clientCapture.remote }
+  const owner = { provider: { provider, settingsNs: options.settingsNs || 'llm-pi-ai' }, buttonClassName: options.buttonClassName, settingsNs: options.settingsNs || 'llm-pi-ai', keyConfigured: options.keyConfigured ?? (provider === 'openai-codex') }
+  const draw = () => render(() => [options.headerActions ? React.createElement(actionsFactory, { ...owner, key: 'header' }) : null, React.createElement(cardFactory, { ...owner, key: 'body' })])
+  return { draw, pool, accounts, remoteDescriptor: clientCapture.remote, dependencies: clientCapture.dependencies }
 }
 
 const settle = async () => { for (let i = 0; i < 6; i++) await new Promise(resolve => setImmediate(resolve)) }
 
 // The quota area lives behind a native fold: collapsed by default, so its
 // panels (and their snapshot probes) only mount after the first expand.
-const openFold = nodes => {
-  const fold = nodes.find(node => node.props?.['data-fold'] === 'true')
-  assert.ok(fold, 'a fold wraps the quota area')
-  assert.equal(fold.props['data-fold-open'], 'false', 'fold starts collapsed')
-  fold.props.onToggle({ currentTarget: { open: true } })
+const openManagement = nodes => {
+  const trigger = nodes.find(node => node.props?.['data-provider-pool-fallback'] || node.props?.['data-provider-pool-action'])
+  assert.ok(trigger, 'one compact action opens the management area')
+  assert.equal(trigger.props['aria-expanded'], false, 'management starts hidden')
+  trigger.props.onClick()
 }
 
 test('quota folds stay collapsed until opened, then the panel probes once', async () => {
@@ -173,18 +188,18 @@ test('quota folds stay collapsed until opened, then the panel probes once', asyn
   assert.equal(nodes.filter(node => node.props?.['data-quota-section']).length, 0, 'no quota panel mounts while collapsed')
   assert.equal(nodes.filter(node => node.props?.['data-codex-accounts']).length, 0, 'no account pool mounts while collapsed')
   assert.equal(calls.snapshot, 0, 'no snapshot probe fires while collapsed')
-  openFold(nodes)
-  await settle()
+  openManagement(nodes)
+  await settleDraw(draw)
   nodes = flatten(draw())
   assert.equal(nodes.filter(node => node.props?.['data-quota-section']).length, 1, 'expanding mounts the account quota panel')
   assert.equal(nodes.filter(node => node.props?.['data-codex-accounts']).length, 1, 'the codex account pool mounts with it')
   assert.ok(nodes.some(node => node.props?.['data-codex-accounts']), 'the codex account section is part of the fold')
   assert.equal(calls.snapshot, 1, 'the probe fires exactly on first expand')
-  const fold = nodes.find(node => node.props?.['data-fold'] === 'true')
-  assert.equal(fold.props['data-fold-open'], 'true')
-  fold.props.onToggle({ currentTarget: { open: false } })
+  const toggle = nodes.find(node => node.props?.['data-provider-pool-fallback'])
+  assert.equal(toggle.props['aria-expanded'], true)
+  toggle.props.onClick()
   nodes = flatten(draw())
-  assert.equal(nodes.find(node => node.props?.['data-fold']).props['data-fold-open'], 'false', 'collapsing is visual; the body stays revealed')
+  assert.equal(nodes.find(node => node.props?.['data-provider-pool-panel']).props.hidden, true, 'collapsing is visual; body stays mounted but takes no height')
   assert.equal(nodes.filter(node => node.props?.['data-quota-section']).length, 1)
 })
 
@@ -196,7 +211,7 @@ test('QuotaPanel renders the sparkline once history points arrive', async () => 
   }
   const { draw } = await mountPanel(quota)
   const settleLoop = async () => { for (let i = 0; i < 8; i++) { await new Promise(resolve => setImmediate(resolve)); draw() } }
-  openFold(flatten(draw()))
+  openManagement(flatten(draw()))
   await settleLoop()
   const nodes = flatten(draw())
   const section = nodes.find(node => node.props?.['data-quota-section'])
@@ -214,17 +229,12 @@ test('QuotaPanel renders the sparkline once history points arrive', async () => 
   assert.equal(ys[0], 18.8)
   assert.equal(ys[ys.length - 1], 16.4)
   assert.ok(ys.every((y, index) => index === 0 || y <= ys[index - 1]), 'rising usage draws a falling line')
-  const caps = nodes.filter(node => node.props?.['data-quota-spark-cap'])
-  assert.equal(caps.length, 2, 'endpoint value labels render')
-  assert.equal(caps[0].props['data-quota-spark-cap'], 'start')
-  assert.equal(caps[0].props.children, '16%')
-  assert.equal(caps[1].props['data-quota-spark-cap'], 'end')
-  assert.equal(caps[1].props.children, '28%')
+  assert.equal(nodes.filter(node => node.props?.['data-quota-spark-cap']).length, 0, 'no labels imply values at empty window boundaries')
   const axis = nodes.find(node => node.props?.['data-quota-spark-axis'])
   assert.ok(axis, 'time axis renders under the sparkline')
   const ticks = nodes.filter(node => node.props?.['data-quota-spark-tick'])
   assert.deepEqual(ticks.map(tick => tick.props['data-quota-spark-tick']), ['start', 'mid', 'end'])
-  assert.ok(ticks.every(tick => /^\d{2}-\d{2} \d{2}:\d{2}$/.test(tick.props.children)), 'sub-two-day span shows hour-precision ticks')
+  assert.ok(ticks.every(tick => /^\d{2}-\d{2}$/.test(tick.props.children)), 'seven-day axis uses calendar dates')
   const bars = nodes.filter(node => node.props?.['data-quota-window'])
   assert.equal(bars.length, 1)
   assert.equal(bars[0].props['data-quota-window'], 'weekly')
@@ -251,7 +261,7 @@ test('QuotaPanel falls back to the placeholder and keeps data on history failure
     history: async () => ({ ok: false, error: { message: 'synthetic history failure' } }),
   }
   const { draw } = await mountPanel(quota)
-  openFold(flatten(draw()))
+  openManagement(flatten(draw()))
   for (let i = 0; i < 8; i++) { await new Promise(resolve => setImmediate(resolve)); draw() }
   const nodes = flatten(draw())
   assert.ok(nodes.find(node => node.props?.['data-quota-section']), 'panel still renders')
@@ -265,15 +275,14 @@ test('flat usage keeps the 100% axis and hovers name each sample and plan change
     history: async () => ({ ok: true, value: { status: 'ok', points: Array.from({ length: 7 }, (_, index) => ({ ts: 1791721950 + index * 3600, used: { weekly: 40 }, ...(index < 3 ? { plan: 'pro' } : { plan: 'plus' }) })) } }),
   }
   const { draw } = await mountPanel(quota)
-  openFold(flatten(draw()))
+  openManagement(flatten(draw()))
   for (let i = 0; i < 8; i++) { await new Promise(resolve => setImmediate(resolve)); draw() }
   let nodes = flatten(draw())
   const polyline = nodes.find(node => typeof node.props?.points === 'string' && node.props.fill === 'none')
   assert.ok(polyline, 'flat usage still renders a line')
   const ys = polyline.props.points.split(' ').map(pair => Number(pair.split(',')[1]))
   assert.ok(ys.every(y => y === 14), 'a flat 40% line sits at y 14 on the fixed 0–100% axis')
-  const caps = nodes.filter(node => node.props?.['data-quota-spark-cap'])
-  assert.equal(caps.map(cap => cap.props.children).join('→'), '40%→40%')
+  assert.equal(nodes.filter(node => node.props?.['data-quota-spark-cap']).length, 0)
   // Plan changes draw one dashed separator with a title naming both plans.
   const planMark = nodes.find(node => node.props?.['data-quota-spark-plan'])
   assert.ok(planMark, 'a plan change draws a separator')
@@ -323,24 +332,23 @@ test('API-key provider card previews every pool key and switches the active one'
   }
   const { draw } = await mountPanel(quota, { provider: 'zai-coding-cn', pool, keyConfigured: true })
   const settleLoop = async () => { for (let i = 0; i < 8; i++) { await new Promise(resolve => setImmediate(resolve)); draw() } }
-  openFold(flatten(draw()))
+  openManagement(flatten(draw()))
   await settleLoop()
   let nodes = flatten(draw())
   const section = nodes.find(node => node.props?.['data-provider-hub-quota'])
   assert.equal(section.props['data-provider-hub-quota'], 'zai-coding-cn')
-  const select = nodes.find(node => node.props?.['data-pool-select'])
-  assert.ok(select, 'the pool renders as a dropdown')
+  nodes = openPicker(draw, 'pool')
   const options = nodes.filter(node => node.props?.['data-pool-option'])
   assert.deepEqual(options.map(option => option.props['data-pool-option']), ['aaaa0001', 'aaaa0002'])
-  assert.match(options[0].props.children, /zai-gsj（当前生效）/u)
-  assert.equal(options[1].props.children, 'zai-team')
+  assert.match(textOf(options[0]), /zai-gsj.*当前生效/u)
+  assert.equal(textOf(options[1]).trim(), 'zai-team')
   assert.equal(nodes.filter(node => node.props?.['data-quota-section']).length, 1, 'the active key carries its quota panel')
   assert.equal(calls.snapshot[0].provider, 'zai-coding-cn', 'the active panel queries the official credential')
   assert.equal(calls.snapshot[0].keyId, undefined, 'the active panel rides the route credential, not a pool key')
   assert.equal(calls.snapshot[0].maxAgeMs, 300000)
 
   // Selecting the second key and expanding details mounts its own panel.
-  select.props.onChange({ target: { value: 'aaaa0002' } })
+  chooseAccount(draw, 'pool', 'aaaa0002')
   nodes = flatten(draw())
   nodes.find(node => node.props?.['data-pool-action'] === 'details').props.onClick()
   await settleLoop()
@@ -349,11 +357,11 @@ test('API-key provider card previews every pool key and switches the active one'
   assert.equal(calls.snapshot.at(-1).keyId, 'aaaa0002', 'the expanded panel names its pool key')
 
   // Renaming the selected key goes through the pool remote.
-  nodes.find(node => node.props?.['data-pool-action'] === 'rename').props.onClick()
+  startRename(draw, 'pool', 'aaaa0002', 'zai-team-2')
   nodes = flatten(draw())
   const renameForm = nodes.find(node => node.props?.['data-pool-rename'])
   assert.ok(renameForm, 'an inline rename form appears')
-  await renameForm.props.onSubmit({ preventDefault: () => {}, currentTarget: { elements: { name: { value: 'zai-team-2' } } } })
+  await renameForm.props.onSubmit({ preventDefault: () => {}, stopPropagation() {}, currentTarget: { elements: { name: { value: 'zai-team-2' } } } })
   await settleLoop()
   assert.deepEqual(calls.rename.map(call => ({ ...call })), [{ id: 'aaaa0002', name: 'zai-team-2' }])
 
@@ -363,21 +371,22 @@ test('API-key provider card previews every pool key and switches the active one'
   await settleLoop()
   nodes = flatten(draw())
   assert.deepEqual(calls.setActive.map(call => ({ ...call })), [{ id: 'aaaa0002' }])
+  nodes = openPicker(draw, 'pool')
   const optionsAfter = nodes.filter(node => node.props?.['data-pool-option'])
-  assert.match(optionsAfter[1].props.children, /（当前生效）/u, 'the switched key is labelled active')
-  assert.ok(!String(optionsAfter[0].props.children).includes('当前生效'))
+  assert.match(textOf(optionsAfter[1]), /当前生效/u, 'the switched key is labelled active')
+  assert.ok(!textOf(optionsAfter[0]).includes('当前生效'))
 
   // The add form stores a named key through the pool remote.
   const form = nodes.find(node => node.props?.['data-pool-add'])
   await form.props.onSubmit({
-    preventDefault: () => {},
+    preventDefault: () => {}, stopPropagation() {},
     currentTarget: { elements: { name: { value: 'zai-new' }, value: { value: 'sk-synthetic-new' } }, reset: () => {} },
   })
   assert.deepEqual(calls.add.map(call => ({ ...call })), [{ provider: 'zai-coding-cn', name: 'zai-new', value: 'sk-synthetic-new' }])
 
   // Selecting back the first key, then removing it.
   nodes = flatten(draw())
-  nodes.find(node => node.props?.['data-pool-select']).props.onChange({ target: { value: 'aaaa0001' } })
+  chooseAccount(draw, 'pool', 'aaaa0001')
   nodes = flatten(draw())
   nodes.find(node => node.props?.['data-pool-action'] === 'remove').props.onClick()
   await settleLoop()
@@ -416,56 +425,68 @@ test('Codex account pool lists sources, imports, switches, renames and drops', a
   }
   const { draw } = await mountPanel(quota, { provider: 'openai-codex', accounts })
   const settleLoop = async () => { for (let i = 0; i < 8; i++) { await new Promise(resolve => setImmediate(resolve)); draw() } }
-  openFold(flatten(draw()))
+  openManagement(flatten(draw()))
   await settleLoop()
   let nodes = flatten(draw())
   const current = nodes.find(node => node.props?.['data-codex-current'])
   assert.ok(current, 'the current account line renders')
   assert.match(current.props.children, /vickie@example.test/u)
-  const select = nodes.find(node => node.props?.['data-codex-select'])
-  assert.ok(select, 'the account pool renders as a dropdown')
+  nodes = openPicker(draw, 'codex')
   const options = nodes.filter(node => node.props?.['data-codex-option'])
   assert.deepEqual(options.map(option => option.props['data-codex-option']), ['ab12cd34', 'ef567890'])
-  assert.match(options[0].props.children, /vickie（当前生效）/u)
+  assert.match(textOf(options[0]), /vickie.*当前生效/u)
   // The import form previews both CLI directories with their availability.
+  nodes = openAdd(draw, 'cli', 'gth')
   let importForm = nodes.find(node => node.props?.['data-codex-import'])
   assert.ok(importForm, 'the import form renders inside the fold')
-  const sourceOptions = nodes.filter(node => node.props?.['data-codex-source'])
-  assert.deepEqual(sourceOptions.map(option => option.props['data-codex-source']), ['codex', 'codex-gth', 'missing'])
-  assert.match(sourceOptions[0].props.children, /codex（全局/u)
-  assert.ok(!sourceOptions[0].props.children.includes('qq@example.test'), 'email is not squeezed into an option')
-  assert.match(sourceOptions[1].props.children, /已过期/u)
-  assert.equal(sourceOptions[1].props.disabled, false, 'expired sources remain importable')
-  assert.equal(sourceOptions[2].props.disabled, true, 'unusable sources are disabled')
+  nodes = openPicker(draw, 'codex-source')
+  const sourceOptions = nodes.filter(node => node.props?.['data-codex-source-option'])
+  assert.deepEqual(sourceOptions.map(option => option.props['data-codex-source-option']), ['codex', 'codex-gth', 'missing'])
+  assert.match(textOf(sourceOptions[0]), /codex（全局/u)
+  assert.ok(!textOf(sourceOptions[0]).includes('qq@example.test'), 'email is shown in the details, not squeezed into the option')
+  assert.match(textOf(sourceOptions[1]), /已过期/u)
+  assert.equal(sourceOptions[1].props.disabled, false, 'expired sources remain inspectable and importable')
+  assert.equal(sourceOptions[2].props.disabled, false, 'missing sources remain inspectable, but cannot be imported')
+  assert.ok(!nodes.some(node => node.type === 'select'), 'CLI sources also use the non-native picker')
+  const sourceList = nodes.find(node => node.props?.['data-account-list'] === 'codex-source')
+  assert.ok(!flatten(sourceList).some(node => node.props?.['data-account-rename']), 'source directories have no rename mutation')
   assert.equal(nodes.find(node => node.props?.['data-codex-source-path']).props.children, '/home/synthetic/.codex')
   assert.match(nodes.find(node => node.props?.['data-codex-source-status']).props.children, /qq@example.test/u)
 
   // Import carries the chosen source and optional name, but never switches.
-  nodes.find(node => node.props?.['data-codex-source-select']).props.onChange({ target: { value: 'codex-gth' } })
+  chooseAccount(draw, 'codex-source', 'codex-gth')
   nodes = flatten(draw())
   importForm = nodes.find(node => node.props?.['data-codex-import'])
-  await importForm.props.onSubmit({ preventDefault: () => {}, currentTarget: { elements: { name: { value: 'gth' } } } })
+  await importForm.props.onSubmit({ preventDefault: () => {}, stopPropagation() {}, currentTarget: { elements: { name: { value: 'gth' } } } })
   await settleLoop()
   assert.deepEqual(calls.import.map(call => ({ ...call })), [{ source: 'codex-gth', name: 'gth' }])
   assert.equal(calls.setActive.length, 0, 'import does not switch accounts')
   nodes = flatten(draw())
   assert.match(nodes.find(node => node.props?.['data-codex-notice']).props.children, /当前账号未切换/u)
   assert.ok(calls.snapshot.filter(request => !request.grantId).length >= 2, 'import refreshes the main quota panel')
-  assert.deepEqual(nodes.filter(node => node.props?.['data-codex-option']).map(option => option.props['data-codex-option']), ['ab12cd34', 'ef567890', '99aabbcc'])
+  assert.deepEqual(openPicker(draw, 'codex').filter(node => node.props?.['data-codex-option']).map(option => option.props['data-codex-option']), ['ab12cd34', 'ef567890', '99aabbcc'])
 
   // Per-account quota preview passes the grant id.
-  select.props.onChange({ target: { value: 'ef567890' } })
+  chooseAccount(draw, 'codex', 'ef567890')
   nodes = flatten(draw())
   nodes.find(node => node.props?.['data-codex-action'] === 'details').props.onClick()
   await settleLoop()
   assert.equal(calls.snapshot.at(-1).grantId, 'ef567890', 'the per-account panel previews that grant')
   assert.equal(calls.snapshot.at(-1).provider, 'openai-codex')
 
+  // Expired grants are inspectable but cannot be activated, even via a stale callback.
+  nodes = flatten(draw())
+  const expiredUse = nodes.find(node => node.props?.['data-codex-action'] === 'use')
+  assert.equal(expiredUse.props.disabled, true)
+  expiredUse.props.onClick()
+  assert.equal(calls.setActive.length, 0)
+  // Simulate a freshly updated CLI grant arriving before the next pool refresh.
+  entries[1].expired = false; entries[1].expires = 1990000600
   // Rename, then switch the official account.
   nodes = flatten(draw())
-  nodes.find(node => node.props?.['data-codex-action'] === 'rename').props.onClick()
+  startRename(draw, 'codex', 'ef567890', 'qq-main')
   nodes = flatten(draw())
-  await nodes.find(node => node.props?.['data-codex-rename']).props.onSubmit({ preventDefault: () => {}, currentTarget: { elements: { name: { value: 'qq-main' } } } })
+  await nodes.find(node => node.props?.['data-codex-rename']).props.onSubmit({ preventDefault: () => {}, stopPropagation() {}, currentTarget: { elements: { name: { value: 'qq-main' } } } })
   await settleLoop()
   assert.deepEqual(calls.rename.map(call => ({ ...call })), [{ id: 'ef567890', name: 'qq-main' }])
   nodes = flatten(draw())
@@ -478,7 +499,7 @@ test('Codex account pool lists sources, imports, switches, renames and drops', a
   assert.equal(calls.snapshot.filter(request => !request.grantId).at(-1).maxAgeMs, 0, 'mutation refresh bypasses the quota cache')
   assert.ok(!nodes.some(node => node.props?.['data-codex-operation-error']), 'awaited successful actions do not show generic errors')
   // Removing the imported account drops its record.
-  nodes.find(node => node.props?.['data-codex-select']).props.onChange({ target: { value: '99aabbcc' } })
+  chooseAccount(draw, 'codex', '99aabbcc')
   nodes = flatten(draw())
   nodes.find(node => node.props?.['data-codex-action'] === 'remove').props.onClick()
   await settleLoop()
@@ -496,7 +517,7 @@ const textOf = node => {
   if (node && typeof node === 'object') return textOf(node.props?.children)
   return typeof node === 'string' ? node : ''
 }
-const formEvent = elements => ({ preventDefault() {}, currentTarget: { elements } })
+const formEvent = elements => ({ preventDefault() {}, stopPropagation() {}, currentTarget: { elements } })
 
 test('CLI source contract passes request objects and shows full custom directory details', async () => {
   const calls = { sources: [], import: [] }
@@ -518,9 +539,9 @@ test('CLI source contract passes request objects and shows full custom directory
   assert.equal(sourceDescriptor.parameters[0].name, 'request')
   assert.deepEqual({ ...sourceDescriptor.parameters[0].codec.create().parse({ directory: '~/codex-work' }) }, { directory: '~/codex-work' })
   assert.throws(() => sourceDescriptor.parameters[0].codec.create().parse('~/codex-work'))
-  openFold(flatten(draw()))
+  openManagement(flatten(draw()))
   await settleDraw(draw)
-  let nodes = flatten(draw())
+  let nodes = openAdd(draw, 'cli', 'Custom CLI')
   assert.deepEqual(calls.sources.map(request => ({ ...request })), [{}], 'default discovery passes an object, not undefined')
   assert.match(nodes.find(node => node.props?.['data-codex-current']).props.children, /outside-pool@example.test/u, 'a current account outside the pool is not reported signed out')
   assert.ok(nodes.find(node => node.props?.['data-codex-action'] === 'import').props.disabled)
@@ -530,12 +551,13 @@ test('CLI source contract passes request objects and shows full custom directory
   await settleDraw(draw)
   nodes = flatten(draw())
   assert.deepEqual(calls.sources.map(request => ({ ...request })), [{}, { directory: '~/codex-work' }])
-  assert.equal(nodes.find(node => node.props?.['data-codex-source-select']).props.value, 'directory')
+  assert.equal(nodes.find(node => node.props?.['data-codex-source-select']).props['data-selected-id'], 'directory')
   assert.equal(nodes.find(node => node.props?.['data-codex-source-path']).props.children, home)
-  assert.equal(nodes.find(node => node.props?.['data-codex-source-auth-path']).props.children, `${home}/auth.json`)
+  assert.ok(!nodes.some(node => node.props?.['data-codex-source-auth-path']), 'auth.json path is not repeated')
   assert.match(nodes.find(node => node.props?.['data-codex-source-status']).props.children, /custom@example.test.*可导入/u)
-  assert.match(nodes.find(node => node.props?.['data-codex-source-policy']).props.children, /bounded cc-switch/u)
-  assert.equal(nodes.find(node => node.props?.['data-codex-source']).props.children, 'Other Codex home', 'the option contains only its concise label')
+  assert.match(textOf(nodes.find(node => node.props?.['data-codex-source-policy'])), /bounded cc-switch/u)
+  nodes = openPicker(draw, 'codex-source')
+  assert.equal(textOf(nodes.find(node => node.props?.['data-codex-source-option'] === 'directory')).trim(), 'Other Codex home', 'the custom source row contains only its concise label')
   await nodes.find(node => node.props?.['data-codex-import']).props.onSubmit(formEvent({ name: { value: 'Custom CLI' } }))
   assert.deepEqual(calls.import.map(request => ({ ...request })), [{ directory: home, name: 'Custom CLI' }])
 
@@ -557,9 +579,9 @@ test('source and account load errors remain separate, visible and retryable', as
     sources: async () => sourceFails ? { ok: false, error: { message: 'synthetic directory denial' } } : { ok: true, value: { sources: [{ id: 'codex', label: 'Default Codex', path: '/home/synthetic/.codex', available: true, status: 'ok' }] } },
   }
   const { draw } = await mountPanel(uiQuota(), { accounts })
-  openFold(flatten(draw()))
+  openManagement(flatten(draw()))
   await settleDraw(draw)
-  let nodes = flatten(draw())
+  let nodes = openAdd(draw, 'cli')
   assert.match(textOf(nodes.find(node => node.props?.['data-codex-list-error'])), /加载账号池失败.*synthetic list denial/u)
   assert.match(textOf(nodes.find(node => node.props?.['data-codex-source-error'])), /加载 CLI 来源失败.*synthetic directory denial/u)
   assert.ok(!nodes.find(node => node.props?.['data-codex-current']).props.children.includes('未登录'), 'a list error never invents a signed-out current account')
@@ -590,9 +612,9 @@ test('async import and switch errors show operation context and block duplicate 
   }
   const quota = { ...uiQuota(), snapshot: async () => { calls.snapshot++; return { ok: true, value: { status: 'ok', snapshot: { account: 'current', windows: [] } } } } }
   const { draw } = await mountPanel(quota, { accounts })
-  openFold(flatten(draw()))
+  openManagement(flatten(draw()))
   await settleDraw(draw)
-  let nodes = flatten(draw())
+  let nodes = openAdd(draw, 'cli')
   const submitImport = nodes.find(node => node.props?.['data-codex-import']).props.onSubmit
   const importEvent = formEvent({ name: { value: '' } })
   const pendingImport = submitImport(importEvent)
@@ -600,7 +622,7 @@ test('async import and switch errors show operation context and block duplicate 
   assert.equal(calls.import, 1, 'same-render double submit cannot import twice')
   nodes = flatten(draw())
   assert.equal(nodes.find(node => node.props?.['data-codex-action'] === 'use').props.disabled, true)
-  assert.equal(nodes.find(node => node.props?.['data-login-action'] === 'start').props.disabled, true)
+  assert.ok(nodes.filter(node => node.props?.['data-codex-add-method']).every(node => node.props.disabled), 'cannot switch login methods while mutating')
   resolveImport({ ok: false, error: { message: 'synthetic invalid auth file' } })
   await pendingImport
   nodes = flatten(draw())
@@ -634,12 +656,12 @@ test('browser login reuses searchLogin.start and preserves notices while refresh
   const accounts = { ...emptyAccounts(), list: async () => { calls.list++; return { ok: true, value: { entries } } } }
   const quota = { ...uiQuota(), snapshot: async () => { calls.snapshot++; return { ok: true, value: { status: 'ok', snapshot: { email: entries[0]?.email || 'old@example.test', windows: [] } } } } }
   const { draw } = await mountPanel(quota, { accounts, searchLogin })
-  openFold(flatten(draw()))
+  openManagement(flatten(draw()))
   await settleDraw(draw)
-  let nodes = flatten(draw())
-  assert.match(nodes.find(node => node.props?.['data-login-action'] === 'start').props.children, /添加.*另一个账号/u)
+  let nodes = openAdd(draw, 'web')
+  assert.match(nodes.find(node => node.props?.['data-login-action'] === 'start').props.children, /继续网页登录/u)
   assert.ok(nodes.some(node => node.props?.['data-web-login']))
-  assert.ok(nodes.some(node => node.props?.['data-codex-cli-login']))
+  assert.equal(nodes.filter(node => node.props?.['data-codex-add-method']).length, 2)
   nodes.find(node => node.type === 'input' && node.props.name === 'accountName').props.onChange({ target: { value: 'Second browser' } })
   nodes = flatten(draw())
   const start = nodes.find(node => node.props?.['data-login-action'] === 'start').props.onClick
@@ -658,7 +680,7 @@ test('browser login reuses searchLogin.start and preserves notices while refresh
   nodes = flatten(draw())
   assert.deepEqual(calls.answer, [{ id: 'attempt-web', value: 'confirmed' }])
   assert.ok(calls.list > previousLists, 'OAuth completion refreshes the shared account pool')
-  assert.equal(nodes.find(node => node.props?.['data-codex-option']).props['data-codex-option'], 'new-web')
+  assert.equal(openPicker(draw, 'codex').find(node => node.props?.['data-codex-option']).props['data-codex-option'], 'new-web')
   assert.match(textOf(nodes.find(node => node.props?.['data-codex-account-meta'])), /网页授权/u)
   assert.equal(nodes.find(node => node.props?.['data-quota-email']).props.children, 'browser@example.test')
   assert.equal(calls.snapshot, 2, 'OAuth completion refreshes the main quota panel')
@@ -675,10 +697,10 @@ test('KeyPool awaits rejected mutations, preserves rename drafts and guards add 
     add: async () => { calls.add++; return await new Promise(resolve => { finishAdd = resolve }) },
   }
   const { draw } = await mountPanel(uiQuota(), { provider: 'zai', keyConfigured: true, pool })
-  openFold(flatten(draw()))
+  openManagement(flatten(draw()))
   await settleDraw(draw)
   let nodes = flatten(draw())
-  nodes.find(node => node.props?.['data-pool-action'] === 'rename').props.onClick()
+  startRename(draw, 'pool', 'named-key', 'New name')
   nodes = flatten(draw())
   await nodes.find(node => node.props?.['data-pool-rename']).props.onSubmit(formEvent({ name: { value: 'New name' } }))
   nodes = flatten(draw())
@@ -696,3 +718,302 @@ test('KeyPool awaits rejected mutations, preserves rename drafts and guards add 
   assert.match(textOf(nodes.find(node => node.props?.role === 'alert')), /添加失败.*synthetic add rejection/u)
   assert.equal(resetCount, 0, 'failed remote add does not erase the form')
 })
+
+test('account pickers share custom row editing, fixed toolbar slots and busy guards', async () => {
+  for (const kind of ['pool', 'codex']) {
+    const names = ['Current account with a very long name '.repeat(8), 'Second account']
+    const entries = [{ id: 'first', name: names[0], active: true }, { id: 'second', name: names[1], active: false }]
+    const renames = []
+    let resolveRename
+    const service = { ...(kind === 'pool' ? emptyPool() : emptyAccounts()), list: async () => ({ ok: true, value: { entries } }), rename: async request => { renames.push(request); return await new Promise(resolve => { resolveRename = resolve }) } }
+    const { draw } = await mountPanel(uiQuota(), kind === 'pool' ? { provider: 'zai', pool: service } : { accounts: service })
+    openManagement(flatten(draw())); await settleDraw(draw)
+    let nodes = flatten(draw())
+    const toolbar = () => flatten(draw()).find(node => node.props?.[`data-${kind}-toolbar`])
+    const signature = () => flatten(toolbar()).filter(node => node.type === 'button').map(node => node.props[`data-${kind}-action`])
+    assert.deepEqual(signature(), ['use', 'details', 'remove'])
+    assert.equal(flatten(toolbar()).find(node => node.props?.[`data-${kind}-action`] === 'use').props.disabled, true)
+    if (kind === 'codex') assert.equal(flatten(toolbar()).find(node => node.props?.['data-codex-action'] === 'remove').props.disabled, true)
+    assert.equal(nodes.find(node => node.props?.[`data-${kind}-select`]).type, 'button')
+    assert.equal(nodes.filter(node => node.type === 'select' && node.props.name !== 'source').length, 0, 'account selection is never a native select')
+    nodes = openPicker(draw, kind)
+    const row = nodes.find(node => node.props?.['data-account-row'] === 'second')
+    const icon = flatten(row).find(node => node.props?.['data-account-rename'])
+    assert.match(icon.props['aria-label'], /Second account/u)
+    assert.equal(icon.props.title, icon.props['aria-label'])
+    assert.ok(flatten(row).find(node => node.props?.['data-account-choice']), 'rename and choose are siblings in the row')
+    for (const button of nodes.filter(node => node.type === 'button')) assert.equal(flatten(button.props.children).filter(node => node.type === 'button').length, 0, 'no nested buttons')
+    let stopped = 0
+    icon.props.onClick({ stopPropagation() { stopped++ } })
+    nodes = flatten(draw())
+    assert.equal(stopped, 1)
+    assert.match(textOf(nodes.find(node => node.props?.[`data-${kind}-select`])), /Current account/u, 'renaming another row does not select it')
+    let form = nodes.find(node => node.props?.[`data-${kind}-rename`])
+    const input = flatten(form).find(node => node.type === 'input')
+    input.props.onChange({ target: { value: 'Renamed row' } })
+    form = flatten(draw()).find(node => node.props?.[`data-${kind}-rename`])
+    const pending = form.props.onSubmit(formEvent({}))
+    await form.props.onSubmit(formEvent({}))
+    assert.equal(renames.length, 1, 'rename is guarded even before rerender')
+    nodes = flatten(draw())
+    assert.ok(nodes.filter(node => node.props?.['data-account-edit']).every(node => node.props.disabled), 'save/cancel are disabled while busy')
+    assert.ok(nodes.find(node => node.props?.[`data-${kind}-select`]).props.disabled)
+    resolveRename({ ok: true, value: {} }); await pending
+    nodes = flatten(draw())
+    assert.deepEqual(renames.map(value => ({ ...value })), [{ id: 'second', name: 'Renamed row' }])
+    assert.ok(!nodes.some(node => node.props?.[`data-${kind}-rename`]))
+    nodes = startRename(draw, kind, 'second', 'Discard this')
+    nodes.find(node => node.props?.['data-account-edit'] === 'cancel').props.onClick({ stopPropagation() {} })
+    assert.ok(!flatten(draw()).some(node => node.props?.[`data-${kind}-rename`]))
+    assert.equal(renames.length, 1, 'cancel makes no RPC')
+    chooseAccount(draw, kind, 'second')
+    assert.deepEqual(signature(), ['use', 'details', 'remove'], 'selection never inserts/removes toolbar buttons')
+    assert.equal(flatten(toolbar()).find(node => node.props?.[`data-${kind}-action`] === 'use').props.disabled, false)
+  }
+})
+
+test('picker keyboard focus uses committed rows and editors keep native text navigation', async () => {
+  const pool = { ...emptyPool(), list: async () => ({ ok: true, value: { entries: [{ id: 'a', name: 'A', active: true }, { id: 'b', name: 'B' }] } }) }
+  const { draw } = await mountPanel(uiQuota(), { provider: 'zai', pool })
+  openManagement(flatten(draw())); await settleDraw(draw)
+  let nodes = flatten(draw())
+  nodes.find(node => node.props?.['data-pool-select']).props.onKeyDown({ key: 'ArrowUp', preventDefault() {} })
+  nodes = flatten(draw())
+  assert.equal(nodes.find(node => node.props?.['data-account-choice'] === 'b').focused, 1, 'first ArrowUp opens then focuses last committed row')
+  let trigger = nodes.find(node => node.props?.['data-pool-select'])
+  trigger.props.onKeyDown({ key: 'ArrowDown', preventDefault() {} })
+  assert.equal(nodes.find(node => node.props?.['data-account-choice'] === 'a').focused, 1, 'already-open trigger immediately focuses first row')
+  nodes = startRename(draw, 'pool', 'b')
+  const list = nodes.find(node => node.props?.['data-account-list'])
+  let prevented = false
+  list.props.onKeyDown({ key: 'Home', preventDefault() { prevented = true } })
+  assert.equal(prevented, false, 'Home/End/arrows stay native while editing')
+  const stableTrigger = nodes.find(node => node.props?.['data-pool-select'])
+  list.props.onKeyDown({ key: 'Escape', preventDefault() {}, stopPropagation() {} })
+  assert.equal(stableTrigger.focused, 1, 'Escape editor cancellation focuses a mounted stable trigger')
+  nodes = flatten(draw())
+  assert.ok(!nodes.some(node => node.props?.['data-pool-rename']))
+  assert.equal(nodes.find(node => node.props?.['data-pool-select']).props['aria-expanded'], true, 'first Escape cancels editing only')
+  nodes.find(node => node.props?.['data-account-list']).props.onKeyDown({ key: 'Escape', preventDefault() {}, stopPropagation() {} })
+  assert.equal(flatten(draw()).find(node => node.props?.['data-pool-select']).props['aria-expanded'], false)
+})
+
+test('every provider uses the same localized account-pool fold title', async () => {
+  for (const locale of ['zh', 'en']) for (const provider of ['openai-codex', 'zai', 'kimi-coding']) {
+    const { draw } = await mountPanel(uiQuota(), { provider, locale })
+    const action = flatten(draw()).find(node => node.props?.['data-provider-pool-fallback'])
+    assert.equal(action.props.children, locale === 'zh' ? '账号池与额度' : 'Account pool & quota')
+  }
+})
+
+test('history axis spans full 24h/7d/30d and recent samples leave earlier time blank', async () => {
+  const quota = { ...uiQuota(), history: async () => ({ ok: true, value: { points: [
+    { ts: TEST_NOW - 3600, used: { weekly: 20 } }, { ts: TEST_NOW, used: { weekly: 30 } },
+  ] } }) }
+  const { draw } = await mountPanel(quota)
+  openManagement(flatten(draw())); await settleDraw(draw)
+  for (const hours of [24, 168, 720]) {
+    let nodes = flatten(draw())
+    nodes.find(node => node.props?.['data-quota-range'] === String(hours)).props.onClick()
+    await settleDraw(draw); nodes = flatten(draw())
+    const ticks = nodes.filter(node => node.props?.['data-quota-spark-tick']).map(node => node.props['data-quota-spark-tick-ts'])
+    assert.deepEqual(ticks, [TEST_NOW - hours * 3600, TEST_NOW - hours * 1800, TEST_NOW])
+    const line = nodes.find(node => node.type === 'polyline')
+    const xs = line.props.points.split(' ').map(pair => Number(pair.split(',')[0]))
+    assert.ok(Math.abs(xs[0] - (100 - 100 / hours)) < .002)
+    assert.equal(xs[1], 100)
+    const polygon = nodes.find(node => node.type === 'polygon')
+    assert.equal(Number(polygon.props.points.split(',')[0]), xs[0], 'fill starts only at first actual sample')
+    assert.equal(nodes.filter(node => node.props?.['data-quota-spark-cap']).length, 0)
+    nodes.find(node => node.props?.['data-quota-spark-hit'] === '0').props.onMouseEnter()
+    assert.match(flatten(draw()).find(node => node.props?.['data-quota-spark-tip']).props.children, /\d{2}-\d{2} \d{2}:\d{2}/u, 'hover keeps minute precision on 30d views')
+  }
+})
+
+test('history filters and sorts timestamps, leaves gaps, and renders single or no samples honestly', async () => {
+  let points = [
+    { ts: TEST_NOW - 3600, used: { weekly: 21 } }, { ts: TEST_NOW - 9 * 3600, used: { weekly: 10 } },
+    { ts: TEST_NOW, used: { weekly: 30 } }, { ts: TEST_NOW - 8 * 3600, used: { weekly: 11 } },
+    { ts: TEST_NOW - 3600, used: { weekly: 22 } }, { ts: TEST_NOW + 1, used: { weekly: 99 } },
+    { ts: TEST_NOW - 169 * 3600, used: { weekly: 99 } }, { ts: 'invalid', used: { weekly: 99 } },
+  ]
+  const quota = { ...uiQuota(), history: async () => ({ ok: true, value: { points } }) }
+  const { draw } = await mountPanel(quota)
+  openManagement(flatten(draw())); await settleDraw(draw)
+  let nodes = flatten(draw())
+  const lines = nodes.filter(node => node.type === 'polyline')
+  assert.equal(lines.length, 2, 'missing hourly buckets split curves and fill into separate segments')
+  const firstEnd = Number(lines[0].props.points.split(' ').at(-1).split(',')[0])
+  const secondStart = Number(lines[1].props.points.split(' ')[0].split(',')[0])
+  assert.ok(secondStart > firstEnd + 3)
+  assert.deepEqual(nodes.filter(node => node.props?.['data-quota-spark-hit']).map(node => node.props['data-quota-spark-ts']), [TEST_NOW - 9 * 3600, TEST_NOW - 8 * 3600, TEST_NOW - 3600, TEST_NOW])
+  points = [{ ts: TEST_NOW - 1800, used: { weekly: 42 } }]
+  nodes.find(node => node.props?.['data-quota-refresh']).props.onClick(); await settleDraw(draw)
+  nodes = flatten(draw())
+  assert.equal(nodes.filter(node => node.type === 'polyline' || node.type === 'polygon').length, 0, 'single sample is not a fabricated line')
+  assert.equal(nodes.filter(node => node.props?.['data-quota-spark-point']).length, 1)
+  assert.equal(nodes.filter(node => node.props?.['data-quota-spark-hit']).length, 1)
+  points = []
+  nodes.find(node => node.props?.['data-quota-refresh']).props.onClick(); await settleDraw(draw)
+  nodes = flatten(draw())
+  assert.ok(nodes.find(node => node.props?.['data-quota-spark-empty']))
+  assert.equal(nodes.filter(node => node.props?.['data-quota-spark-tick']).length, 3, 'empty history retains its full time frame')
+})
+
+test('history request generations reject stale success and stale failure across range switches', async () => {
+  const requests = []
+  const quota = { ...uiQuota(), history: request => new Promise(resolve => requests.push({ request, resolve })) }
+  const { draw } = await mountPanel(quota)
+  openManagement(flatten(draw())); await settleDraw(draw)
+  assert.equal(requests[0].request.hours, 168)
+  let nodes = flatten(draw())
+  nodes.find(node => node.props?.['data-quota-range'] === '720').props.onClick()
+  nodes = flatten(draw())
+  requests[1].resolve({ ok: true, value: { points: [{ ts: TEST_NOW, used: { weekly: 72 } }] } }); await settleDraw(draw)
+  requests[0].resolve({ ok: true, value: { points: [{ ts: TEST_NOW, used: { weekly: 16 } }] } }); await settleDraw(draw)
+  nodes = flatten(draw())
+  assert.equal(nodes.find(node => node.props?.['data-quota-spark-wrap']).props['data-quota-window-start'], TEST_NOW - 720 * 3600)
+  assert.match(textOf(nodes.find(node => node.props?.['data-quota-spark-hit'])), /72%/u)
+  nodes.find(node => node.props?.['data-quota-range'] === '168').props.onClick(); draw()
+  nodes = flatten(draw())
+  assert.ok(nodes.find(node => node.props?.['data-quota-spark-empty']), 'new range cannot borrow old range points')
+  nodes.find(node => node.props?.['data-quota-range'] === '720').props.onClick(); draw()
+  requests[3].resolve({ ok: true, value: { points: [{ ts: TEST_NOW, used: { weekly: 73 } }] } }); await settleDraw(draw)
+  requests[2].resolve({ ok: false, error: { message: 'stale failure' } }); await settleDraw(draw)
+  assert.match(textOf(flatten(draw()).find(node => node.props?.['data-quota-spark-hit'])), /73%/u)
+})
+
+test('header action keeps the original card height and probes only after first click, with old-Host fallback', async () => {
+  const calls = { login: 0, list: 0, sources: 0, snapshot: 0 }
+  const options = { headerActions: true, buttonClassName: 'official-secondary-button',
+    searchLogin: { list: async () => { calls.login++; return { ok: true, value: { entries: [{ key: 'llm-pi-ai/openai-codex', authorized: true }] } } } },
+    accounts: { ...emptyAccounts(), list: async () => { calls.list++; return { ok: true, value: { entries: [] } } }, sources: async () => { calls.sources++; return { ok: true, value: { sources: [] } } } },
+  }
+  const quota = { ...uiQuota(), snapshot: async () => { calls.snapshot++; return { ok: true, value: { status: 'ok', snapshot: { windows: [] } } } } }
+  const { draw, dependencies } = await mountPanel(quota, options)
+  await settleDraw(draw)
+  let nodes = flatten(draw())
+  assert.equal(nodes.filter(node => node.props?.['data-provider-pool-action']).length, 1)
+  assert.equal(nodes.filter(node => node.props?.['data-provider-pool-fallback']).length, 0, 'header mount effect suppresses body fallback after commit')
+  assert.equal(nodes.filter(node => node.props?.['data-provider-pool-panel']).length, 0, 'no hidden wrapper or spacing changes the original body')
+  assert.deepEqual(calls, { login: 0, list: 0, sources: 0, snapshot: 0 })
+  const action = nodes.find(node => node.props?.['data-provider-pool-action'])
+  assert.equal(action.props.className, 'official-secondary-button', 'the seam supplies the same class as official edit')
+  assert.equal(action.props.children, '账号池与额度')
+  action.props.onClick(); await settleDraw(draw)
+  nodes = flatten(draw())
+  const panel = nodes.find(node => node.props?.['data-provider-pool-panel'])
+  assert.equal(panel.props.id, nodes.find(node => node.props?.['data-provider-pool-action']).props['aria-controls'])
+  assert.equal(panel.props.hidden, false)
+  assert.equal(nodes.filter(node => node.type === 'summary').length, 0, 'no extra outer fold bar')
+  assert.deepEqual(calls, { login: 1, list: 1, sources: 1, snapshot: 1 })
+  nodes.find(node => node.props?.['data-provider-pool-action']).props.onClick(); draw()
+  assert.equal(flatten(draw()).find(node => node.props?.['data-provider-pool-panel']).props.style.display, 'none')
+  nodes = flatten(draw()); nodes.find(node => node.props?.['data-provider-pool-action']).props.onClick(); await settleDraw(draw)
+  assert.deepEqual(calls, { login: 1, list: 1, sources: 1, snapshot: 1 }, 'reopening preserves mounted authorization and panel state')
+  assert.ok(dependencies.some(deps => deps.length === 1 && deps[0] === 'uiWorkspace'))
+  assert.ok(dependencies.some(deps => deps.includes('remote.codexAccounts') && !deps.includes('uiWorkspace')), 'directory service is an independent optional injection')
+  options.headerActions = false; await settleDraw(draw)
+  nodes = flatten(draw())
+  assert.equal(nodes.filter(node => node.props?.['data-provider-pool-fallback']).length, 1, 'header unmount restores compatibility action')
+})
+
+test('unified account addition shares one optional name between browser and CLI methods', async () => {
+  const imports = []
+  const accounts = { ...emptyAccounts(), sources: async () => ({ ok: true, value: { defaultSourceId: 'codex-home', globalPath: '/host/.codex', sources: [
+    { id: 'gth', label: 'GTH', path: '/host/gth', available: true, status: 'ready' },
+    { id: 'codex-home', default: true, label: 'Default', path: '/host/.codex', available: false, status: 'missing' },
+  ] } }), import: async request => { imports.push(request); return { ok: true, value: {} } } }
+  const { draw } = await mountPanel(uiQuota(), { accounts })
+  openManagement(flatten(draw())); await settleDraw(draw)
+  let nodes = openAdd(draw, 'web', 'Shared display name')
+  assert.equal(nodes.filter(node => node.type === 'input' && node.props.name === 'accountName').length, 1)
+  assert.ok(!textOf(nodes).includes('方式一'))
+  nodes.find(node => node.props?.['data-codex-add-method'] === 'cli').props.onClick(); nodes = flatten(draw())
+  assert.equal(nodes.find(node => node.type === 'input' && node.props.name === 'accountName').props.value, 'Shared display name')
+  assert.equal(nodes.find(node => node.props?.['data-codex-source-select']).props['data-selected-id'], 'codex-home', 'missing CLI default remains selected instead of silently choosing GTH')
+  assert.equal(nodes.find(node => node.props?.['data-codex-source-path']).props.children, '/host/.codex')
+  assert.equal(nodes.find(node => node.props?.['data-codex-action'] === 'import').props.disabled, true)
+  chooseAccount(draw, 'codex-source', 'gth'); nodes = flatten(draw())
+  await nodes.find(node => node.props?.['data-codex-import']).props.onSubmit(formEvent({}))
+  assert.deepEqual(imports.map(value => ({ ...value })), [{ source: 'gth', name: 'Shared display name' }])
+})
+
+test('Host directory browser shows hidden directories, confirms only chosen Host paths and cancels without changing sources', async () => {
+  const calls = { browse: [], sources: [], signals: [] }
+  const workspace = { listDirectory: async (path, signal) => {
+    calls.browse.push(path); calls.signals.push(signal)
+    return path ? { path, home: '/host', crumbs: [{ name: 'Home', path: '/host' }], entries: [] } : { path: '/host', home: '/host', crumbs: [{ name: 'Home', path: '/host' }], entries: [{ name: '.codex', path: '/host/.codex', hidden: true }, { name: 'Windows account', path: 'C:\\Users\\Test\\.codex' }] }
+  } }
+  const accounts = { ...emptyAccounts(), sources: async request => { calls.sources.push(request); return { ok: true, value: { sources: [{ id: request.directory ? 'directory' : 'codex', label: 'Default', path: request.directory || '/host/.codex', available: true, status: 'ready' }] } } } }
+  const { draw } = await mountPanel(uiQuota(), { accounts, workspace })
+  openManagement(flatten(draw())); await settleDraw(draw)
+  let nodes = openAdd(draw, 'cli')
+  nodes.find(node => node.props?.['data-codex-action'] === 'browse').props.onClick(); await settleDraw(draw)
+  nodes = flatten(draw())
+  assert.deepEqual(calls.browse, [undefined], 'browsing begins from Host home, not an invented local browser path')
+  assert.ok(nodes.find(node => node.props?.['data-directory-entry'] === '/host/.codex'), 'hidden .codex stays visible')
+  nodes.find(node => node.props?.['data-directory-entry'] === 'C:\\Users\\Test\\.codex').props.onClick(); await settleDraw(draw)
+  nodes = flatten(draw())
+  assert.equal(nodes.find(node => node.props?.['data-directory-path']).props.children, 'C:\\Users\\Test\\.codex')
+  const before = calls.sources.length
+  nodes.find(node => node.props?.['data-directory-action'] === 'cancel').props.onClick(); draw()
+  assert.equal(calls.signals.at(-1).aborted, true, 'closing propagates cancellation to the Host directory request')
+  assert.equal(calls.sources.length, before)
+  nodes = flatten(draw()); nodes.find(node => node.props?.['data-codex-action'] === 'browse').props.onClick(); await settleDraw(draw)
+  nodes = flatten(draw()); nodes.find(node => node.props?.['data-directory-entry'] === '/host/.codex').props.onClick(); await settleDraw(draw)
+  nodes = flatten(draw()); nodes.find(node => node.props?.['data-directory-action'] === 'select').props.onClick(); await settleDraw(draw)
+  assert.deepEqual({ ...calls.sources.at(-1) }, { directory: '/host/.codex' })
+  nodes = flatten(draw())
+  nodes.find(node => node.type === 'input' && node.props.name === 'directory').props.onChange({ target: { value: 'D:\\Codex Home' } }); nodes = flatten(draw())
+  await nodes.find(node => node.props?.['data-codex-directory']).props.onSubmit(formEvent({}))
+  assert.deepEqual({ ...calls.sources.at(-1) }, { directory: 'D:\\Codex Home' }, 'Windows input is sent to Host for validation and normalization')
+})
+
+test('directory native-picker fallback is limited to the declared unavailable capability', async () => {
+  let picks = 0
+  const calls = []
+  const workspace = { listDirectory: async () => { throw { rpcError: { code: 'directory-picker/unavailable', details: { capability: 'native' } } } }, pickDirectory: async () => { picks++; return 'C:\\Codex' } }
+  const accounts = { ...emptyAccounts(), sources: async request => { calls.push(request); return { ok: true, value: { sources: [] } } } }
+  const { draw } = await mountPanel(uiQuota(), { workspace, accounts })
+  openManagement(flatten(draw())); await settleDraw(draw)
+  let nodes = openAdd(draw, 'cli')
+  nodes.find(node => node.props?.['data-codex-action'] === 'browse').props.onClick(); await settleDraw(draw)
+  assert.equal(picks, 1)
+  assert.deepEqual({ ...calls.at(-1) }, { directory: 'C:\\Codex' })
+  workspace.listDirectory = async () => { throw new Error('synthetic host read denied') }
+  nodes = flatten(draw()); nodes.find(node => node.props?.['data-codex-action'] === 'browse').props.onClick(); await settleDraw(draw)
+  nodes = flatten(draw())
+  assert.equal(picks, 1, 'ordinary errors must not silently invoke native picker')
+  assert.match(textOf(nodes.find(node => node.props?.['data-directory-error'])), /synthetic host read denied/u)
+})
+
+function openPicker(draw, kind) {
+  let nodes = flatten(draw())
+  const trigger = nodes.find(node => node.props?.[`data-${kind}-select`])
+  if (!trigger.props['aria-expanded']) trigger.props.onClick()
+  return flatten(draw())
+}
+function chooseAccount(draw, kind, id) {
+  const nodes = openPicker(draw, kind)
+  nodes.find(node => node.props?.['data-account-choice'] === id).props.onClick()
+  return flatten(draw())
+}
+function startRename(draw, kind, id, name) {
+  let nodes = openPicker(draw, kind)
+  nodes.find(node => node.props?.['data-account-rename'] === id).props.onClick({ stopPropagation() {} })
+  nodes = flatten(draw())
+  if (name !== undefined) nodes.find(node => node.props?.[`data-${kind}-rename`] === id).props.children[0].props.onChange({ target: { value: name } })
+  return flatten(draw())
+}
+
+function openAdd(draw, method = 'web', name = '') {
+  let nodes = flatten(draw())
+  const add = nodes.find(node => node.props?.['data-codex-add'])
+  if (!add.props['aria-expanded']) add.props.onClick()
+  nodes = flatten(draw())
+  nodes.find(node => node.props?.['data-codex-add-method'] === method).props.onClick()
+  nodes = flatten(draw())
+  nodes.find(node => node.type === 'input' && node.props.name === 'accountName').props.onChange({ target: { value: name } })
+  return flatten(draw())
+}

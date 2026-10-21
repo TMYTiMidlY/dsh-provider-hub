@@ -153,7 +153,10 @@ async function withClient(t, config = {}) {
   const slots = {
     inject: (_name, callback) => callback(),
     register: (seat, render) => {
-      if (seat.name === 'settings.models.provider-card') return () => {}
+      if (['settings.models.provider-card', 'settings.models.provider-actions'].includes(seat.name)) {
+        assert.equal(seat.key, 'llm-pi-ai', 'Models extensions keep their adapter namespace')
+        return () => {}
+      }
       assert.equal(seat.name, 'plugins.bundle.config', 'the merged bundle owns one keyed config page')
       assert.equal(seat.key, NAMESPACE)
       seatEntry = { seat, render }

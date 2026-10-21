@@ -199,6 +199,44 @@ test('CLI discovery follows explicit roots/launchers, dedupes paths, and accepts
   assert.ok(!JSON.stringify(view).includes('header.'))
 })
 
+test('CLI default metadata names the actual global directory even without an auth file', async t => {
+  const home = await temporary(t)
+  const global = join(home, '.codex'), alternate = join(global, '.cc-switch-launches', 'other')
+  await auth(alternate)
+  const pool = poolFor(credentials(), { home, env: {}, sources: undefined })
+  const view = await pool.sourcesView({})
+  assert.equal(view.defaultSourceId, 'codex')
+  assert.equal(view.globalPath, global)
+  assert.equal(view.sources.find(source => source.default).status, 'missing')
+  assert.ok(view.sources.some(source => source.available), 'a ready alternative must not silently become the default')
+  const explicit = join(home, 'explicit-default')
+  await auth(explicit)
+  const configured = poolFor(credentials(), { home, env: { CODEX_HOME: explicit }, sources: undefined })
+  const selected = await configured.sourcesView({ directory: explicit })
+  assert.equal(selected.globalPath, explicit)
+  assert.equal(selected.defaultSourceId, 'directory', 'manual/global aliases retain default identity after deduplication')
+  assert.equal(selected.sources.filter(source => source.path === explicit).length, 1)
+  assert.equal(selected.sources[0].default, true)
+  const invalid = await poolFor(credentials(), { home, env: { CODEX_HOME: 'relative' }, sources: undefined }).sourcesView({})
+  assert.equal(invalid.defaultSourceId, 'codex')
+})
+
+test('CLI preview and import await server path normalization before reading auth.json', async t => {
+  const home = await temporary(t)
+  const actual = join(home, 'converted-home')
+  await auth(actual)
+  const pool = poolFor(credentials(), { home })
+  const paths = []
+  pool.directoryPath = async value => { paths.push(value); return actual }
+  const windows = 'C:\\Users\\synthetic\\.codex'
+  const view = await pool.sourcesView({ directory: windows })
+  assert.equal(view.sources[0].path, actual)
+  const imported = await pool.importFrom({ directory: windows })
+  assert.equal(imported.email, 'cli@test')
+  assert.deepEqual(paths, [windows, windows])
+  assert.equal(await pool.officialPayload(), undefined)
+})
+
 test('bad auth/JWT sources are isolated; expired OAuth is discoverable and API-key auth is not OAuth', async t => {
   const home = await temporary(t), root = join(home,'.codex'), launches = join(root,'.cc-switch-launches')
   await auth(root)

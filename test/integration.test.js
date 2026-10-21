@@ -83,6 +83,7 @@ test('Typert metadata declares every endpoint the browser mounts, host and remot
 test('client stages independent OpenAI/ZAI switches and only Codex OAuth without owning the settings scope', async () => {
   let registered
   let loginRender
+  let actionsRender
   let settingsRender
   let settingsSeat
   let saved = 0
@@ -173,7 +174,12 @@ test('client stages independent OpenAI/ZAI switches and only Codex OAuth without
     register: (seat, callback) => {
       assert.notEqual(seat.name, 'plugins.item', 'community settings must not add or replace an Official item')
       if (seat.name === 'plugins.bundle.config') { settingsSeat = seat; settingsRender = callback }
-      else { assert.equal(seat.name, 'settings.models.provider-card'); assert.equal(seat.key, 'llm-pi-ai'); loginRender = callback }
+      else {
+        assert.ok(['settings.models.provider-card', 'settings.models.provider-actions'].includes(seat.name))
+        assert.equal(seat.key, 'llm-pi-ai')
+        if (seat.name === 'settings.models.provider-card') loginRender = callback
+        else actionsRender = callback
+      }
       return () => {}
     },
   }
@@ -205,17 +211,30 @@ test('client stages independent OpenAI/ZAI switches and only Codex OAuth without
     const card = loginRender({ provider: { provider } })
     assert.equal(expand(card), null, `no hub card for routes without a quota surface (${provider})`)
   }
+  assert.equal(typeof actionsRender, 'function', 'the independent native action slot is registered')
+  const openManagement = provider => {
+    const props = { provider: { provider, settingsNs: 'llm-pi-ai' }, keyConfigured: true }
+    const initial = expand(loginRender(props))
+    const children = initial.props.children.flat()
+    assert.ok(!children.some(node => node?.props?.['data-provider-pool-panel']), 'management adds no panel before first click')
+    const fallback = children.find(node => node?.props?.['data-provider-pool-fallback'])
+    assert.ok(fallback, 'older Hosts retain a single compact button')
+    const native = expand(actionsRender({ ...props, buttonClassName: 'official-secondary' }))
+    assert.equal(native.type, 'button')
+    assert.equal(native.props.className, 'official-secondary', 'native action uses the official button style')
+    native.props.onClick()
+    const panel = expand(loginRender(props)).props.children.flat().find(node => node?.props?.['data-provider-pool-panel'])
+    return expand(panel.props.children[0])
+  }
   for (const provider of ['zai', 'zai-coding-cn', 'kimi-coding', 'xiaomi-token-plan-cn']) {
-    const card = loginRender({ provider: { provider }, keyConfigured: true, pool: {}, quota: {} })
-    const section = expand(card)
+    const section = openManagement(provider)
     assert.equal(section.props['data-provider-hub-quota'], provider, 'API-key providers get the quota + key-pool card')
     const nodes = []
     const visit = node => { if (Array.isArray(node)) { node.forEach(visit); return } if (node && typeof node === 'object') { nodes.push(node); for (const child of node.props?.children ?? []) visit(child) } }
     visit(section)
     assert.ok(!nodes.some(node => node.props?.['data-login-action']), 'API-key providers never render an OAuth button')
   }
-  const card = loginRender({ provider: { provider: 'openai-codex' } })
-  assert.equal(expand(card).props['data-provider-hub-login'], 'openai-codex')
+  assert.equal(openManagement('openai-codex').props['data-provider-hub-login'], 'openai-codex')
   assert.equal(settingsSeat.name, 'plugins.bundle.config')
   assert.equal(settingsSeat.key, manifest.name)
   assert.equal(settingsSeat.id, undefined, 'the form belongs to the installed bundle, not a separate official card')
