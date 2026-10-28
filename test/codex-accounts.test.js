@@ -143,7 +143,7 @@ test('rename edits in place and drop removes the record', async t => {
   assert.equal(await pool.rename({ id, name: 'x' }).then(() => 'resolved', error => error.message), 'codex account not found')
 })
 
-test('the service mounts with non-reserved wire names and the fixed CLI sources', async () => {
+test('the service mounts with non-reserved wire names and generic CLI discovery', async () => {
   const source = readFileSync(new URL('../lib/codex-accounts.js', import.meta.url), 'utf8')
   assert.match(source, /extends TypertRemoteService/u)
   assert.match(source, /super\(ctx, 'codexAccounts'\)/u)
@@ -154,7 +154,9 @@ test('the service mounts with non-reserved wire names and the fixed CLI sources'
     assert.ok(!new RegExp(`async ${reserved}\\(`).test(serviceRegion), `wire name ${reserved} is reserved`)
   }
   assert.ok(!source.includes('40b7472da8db3f767b3960f45bb06cfe45a2918d5600f1a475530f55489c50a4'), 'discovery must not hardcode a personal CLI directory')
-  assert.ok(source.includes('.cc-switch-launches'))
+  const discovery = readFileSync(new URL('../lib/codex-discovery.js', import.meta.url), 'utf8')
+  assert.ok(!/cc-switch/iu.test(source + discovery), 'no tool-specific discovery rules')
+  assert.ok(source.includes('CodexDiscovery'))
   for (const method of ['list', 'sources', 'import', 'drop', 'rename', 'setActive']) {
     assert.match(serviceRegion, new RegExp(`async ${method}\\(`, 'u'), `service exposes ${method}`)
   }
