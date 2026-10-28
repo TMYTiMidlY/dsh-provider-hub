@@ -899,18 +899,29 @@ test('history request generations reject stale success and stale failure across 
   assert.match(textOf(flatten(draw()).find(node => node.props?.['data-quota-spark-hit'])), /73%/u)
 })
 
-test('rc.2 body entry is a compact right-aligned button, remains lazy and does not manipulate Host layout', async () => {
+test('rc.2 entry docks left of the native edit button via borrow-and-return, stays lazy with a body fallback', async () => {
   const source = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
   const containerCss = source.match(/\.provider-hub-pool-entry \{([^}]+)\}/u)?.[1]
   const buttonCss = source.match(/\.provider-hub-pool-entry > \.provider-hub-pool-action \{([^}]+)\}/u)?.[1]
+  const dockedCss = source.match(/\.provider-hub-pool-action\[data-provider-pool-dock="row"\] \{([^}]+)\}/u)?.[1]
   assert.match(containerCss, /display:flex/u)
   assert.match(containerCss, /justify-content:flex-end/u)
   assert.match(buttonCss, /width:auto/u)
   assert.match(buttonCss, /max-width:100%/u)
   assert.match(buttonCss, /flex:0 1 auto/u)
   assert.match(buttonCss, /white-space:normal/u)
-  assert.doesNotMatch(`${containerCss} ${buttonCss}`, /position:|margin[^:]*:\s*-/u, 'no overlay or negative-margin fake header row')
-  assert.doesNotMatch(source, /createPortal|\.closest\(|MutationObserver|zGbnIq_/u, 'no private Host DOM, class hash or portal placement')
+  assert.ok(dockedCss, 'a docked row variant of the action button exists')
+  assert.match(dockedCss, /height:28px/u)
+  assert.match(dockedCss, /white-space:nowrap/u)
+  assert.doesNotMatch(`${containerCss} ${buttonCss} ${dockedCss}`, /position:|margin[^:]*:\s*-/u, 'no overlay or negative-margin fake header row')
+  // Structural borrow-and-return: detect the native row without private class
+  // hashes or observers, dock LEFT of the edit button, and always return the
+  // node to its React-owned parent so unmounts stay clean. Detection failure
+  // keeps the 0.7.1 body-position entry.
+  assert.match(source, /closest\?\.\('li'\)/u, 'row detection stays structural')
+  assert.match(source, /rowActions\.insertBefore\(node, editButton\)/u, 'docks before the native edit button')
+  assert.match(source, /moved\.home\.appendChild\(moved\.node\)/u, 'cleanup returns the borrowed node home')
+  assert.doesNotMatch(source, /createPortal|MutationObserver|zGbnIq_/u, 'no portal, observer or private Host class hash')
   for (const locale of ['zh', 'en']) for (const provider of ['openai-codex', 'zai', 'zai-coding-cn', 'kimi-coding', 'xiaomi-token-plan-cn']) {
     let probes = 0
     const quota = { ...uiQuota(), snapshot: async () => { probes++; return { ok: true, value: { status: 'signed-out' } } } }

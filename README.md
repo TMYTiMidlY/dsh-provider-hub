@@ -4,6 +4,8 @@
 
 一个独立的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 插件，**始终保留官方搜索，再为所有已有 `web_search` 附加 Codex / Z.AI 搜索增强**，在 Web Models 页面提供 ChatGPT/Codex OAuth 登录入口与 **多 Provider 账号额度查询 / 小时记录 / 多 Key 池 / Codex 账号池与 CLI 登录态导入**，并提供可勾选的 **Codex / Z.AI 生图工具**。
 
+> `0.7.4` 「账号池与额度」入口改停靠到 provider 行官方**「编辑」按钮左侧**：rc.2 无头部动作插槽时，按结构探测借用原生行内动作区并排显示（借位归还——卸载前把节点还给 React 父级，不写宿主私有类名哈希、不用 MutationObserver / portal）；探测不到预期行结构时自动回退 0.7.1 的正文右对齐入口。此补丁不重启服务；安装文件不等于当前客户端已加载新版本，需以实际服务的客户端产物核验为准。
+
 > `0.7.3` 登录卡新增**退出登录**：按 key 全量撤回该授权（含其他页面发起的流程）并删除凭据记录，仅接受已注册授权流的 key，Codex 账号池条目独立存活、可重新设为当前。取消单个 attempt 仍按独立信号管理，不按 key 全局取消。此补丁不重启服务；安装文件不等于当前客户端已加载新版本，需以实际服务的客户端产物核验为准。
 
 > `0.7.2` 集成全量搜索、0.7.1 账号池/额度界面与远端 Codex 多图参考生图能力。搜索默认 `searchMaxResults: 0`，保留实际收到并去重后的所有来源，修复启动顺序和设置热更新遗漏，停用后恢复原始上限。详细来源及验收边界见 [集成来源说明](docs/integration-lineage.md)。
@@ -65,13 +67,13 @@
 
 ## 安装
 
-先在独立 `DSH_HOME` 验收，再安装到目标 Web profile。打包 `0.7.3` 使用新的目录，不覆盖之前版本的产物：
+先在独立 `DSH_HOME` 验收，再安装到目标 Web profile。打包 `0.7.4` 使用新的目录，不覆盖之前版本的产物：
 
 ```sh
 PACK_DIR="$(mktemp -d /tmp/dsh-provider-hub-pack.XXXXXX)"
 npm pack --pack-destination "${PACK_DIR:?}"
 # 在已安装 dsh 的主机上：
-npm_config_auto_install_peers=false dsh plugin --profile web add "${PACK_DIR:?}/dsh-provider-hub-0.7.3.tgz"
+npm_config_auto_install_peers=false dsh plugin --profile web add "${PACK_DIR:?}/dsh-provider-hub-0.7.4.tgz"
 ```
 
 从 `dsh-web-search` 0.3.x 升级：先 `dsh plugin --profile web remove dsh-web-search`，再按上面安装新包，并把 profile patch 中 `- id: dsh-web-search` 条目改名为 `dsh-provider-hub`（配置字段名不变，废弃的 `tool` 兼容字段可删除）。entry id 变更意味着旧配置不会自动迁移；额度三项缺省时使用默认值。
