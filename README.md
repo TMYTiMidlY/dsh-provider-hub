@@ -168,7 +168,7 @@ Z.AI 官方 zread MCP 的 tool 契约不保证支持通用网页 URL，不能仅
 
 ## 登录
 
-Models 页面中只有 `llm-pi-ai` 的 ChatGPT/Codex provider 行显示本插件的账号授权区。按钮启动 DSH authorization flow；授权状态、外部页面、device code 与手工确认分层展示。等待授权时不能重复启动；可以取消本页面拥有的 attempt。
+Models 页面中只有 `llm-pi-ai` 的 ChatGPT/Codex provider 行显示本插件的账号授权区。按钮启动 DSH authorization flow；授权状态、外部页面、device code 与手工确认分层展示。等待授权时不能重复启动；可以取消本页面拥有的 attempt。已登录时标题栏提供**退出登录**：按 key 全量撤回该授权（含其他页面发起的流程）并删除凭据记录；Codex 账号池条目独立存活，可随时重新设为当前。
 
 本插件不修改 Settings 私有父布局；窄屏可用性仍取决于原生壳，不能仅凭无横向溢出认为通过移动端验收。
 
@@ -176,7 +176,7 @@ Models 页面中只有 `llm-pi-ai` 的 ChatGPT/Codex provider 行显示本插件
 
 `zai` 和 `zai-coding-cn` 不添加 OAuth 按钮，直接使用官方 provider 编辑器的 API Key 入口。搜索读取已有凭据记录或官方管理的 `ZAI_API_KEY` / `ZAI_CODING_CN_API_KEY` 引用，不要求重复配置。`zai-coding-cn` 是凭据来源，不是第二个搜索开关。
 
-远程 WebUI 的 OAuth callback 不能假定远程主机拥有浏览器的 `localhost`，因此应使用 pi-ai flow 自带的手工 URL/code fallback。搜索读取现存且未过期的 Codex grant，本身不会主动刷新过期 grant。取消按独立 attempt 信号管理，不按账号 key 全局取消；导航离开后，重新打开授权区可恢复仍在运行的 attempt。
+远程 WebUI 的 OAuth callback 不能假定远程主机拥有浏览器的 `localhost`，因此应使用 pi-ai flow 自带的手工 URL/code fallback。搜索读取现存且未过期的 Codex grant，本身不会主动刷新过期 grant。取消单个 attempt 按独立 attempt 信号管理，不按账号 key 全局取消；退出登录是唯一的 key 级操作，仅接受已注册的授权流 key，账号池记录不经过它删除。导航离开后，重新打开授权区可恢复仍在运行的 attempt。
 
 ### 账号额度展示与记录
 

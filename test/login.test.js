@@ -37,6 +37,35 @@ test('cancellation does not falsely report cancelled while an admitted commit wi
   assert.equal(service.status(a.id).status,'authorized')
 })
 
+test('logout withdraws its own key only and deletes the credential record',async()=>{
+  const seamCancelled=[],deleted=[]
+  const service=bridge({
+    describe:key=>key==='test/mine'||key==='test/other'?{}:undefined,
+    cancel:key=>seamCancelled.push(key),
+    begin:request=>new Promise(resolve=>{
+      request.signal.addEventListener('abort',()=>resolve({status:'cancelled'}),{once:true})
+    }),
+  },{deleteRecord:async key=>{deleted.push(key)}})
+  const mine=service.start({key:'test/mine'})
+  const other=service.start({key:'test/other'})
+  const result=await service.logout('test/mine')
+  await settled()
+  assert.deepEqual(result,{key:'test/mine',status:'logged-out'})
+  assert.deepEqual(seamCancelled,['test/mine'])
+  assert.deepEqual(deleted,['test/mine'])
+  assert.equal(service.status(mine.id).status,'cancelled')
+  assert.equal(service.status(other.id).status,'running','a logout must not stop another key attempt')
+  service.cancel(other.id); await settled()
+})
+
+test('logout rejects keys without a registered authorization flow',async()=>{
+  const deleted=[]
+  const service=bridge({describe:()=>undefined},{deleteRecord:async key=>{deleted.push(key)}})
+  await assert.rejects(()=>service.logout('dsh-provider-hub/codex-account-abcd1234'),/no authorization flow is registered/)
+  await assert.rejects(()=>service.logout('  '),/non-empty string/)
+  assert.deepEqual(deleted,[])
+})
+
 test('select prompt preserves options and validates string answer',async()=>{
   const service=bridge({describe:()=>({}),begin:async request=>{
     await request.interaction.prompt({kind:'select',message:'Choose',options:[{id:'one',label:'One'}]})
