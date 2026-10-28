@@ -4,6 +4,8 @@
 
 一个独立的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 插件，**始终保留官方搜索，再为所有已有 `web_search` 附加 Codex / Z.AI 搜索增强**，在 Web Models 页面提供 ChatGPT/Codex OAuth 登录入口与 **多 Provider 账号额度查询 / 小时记录 / 多 Key 池 / Codex 账号池与 CLI 登录态导入**，并提供可勾选的 **Codex / Z.AI 生图工具**。
 
+> `0.7.8` 修正账号栏和额度卡相贴的拥挤布局：账号管理区固定 14px 纵向节奏、标题下留 8px，账号摘要/选择与添加按钮居中对齐；额度卡增加内边距，窗口与历史区分层留白。曲线保持真实时间范围与 72px 坐标高度，边缘数值留 4px 安全距离、绘图区右侧留 6px，不挪动或拉伸采样时间。真实浏览器增加双额度窗口、15 个右侧密集采样点及几何间距检查。
+
 > `0.7.7` 统一 Codex 与 API Key 的**「＋ 添加账号」入口**：都在账号摘要/选择旁展开表单，保存/导入动作不再冒充第二个添加入口；单账号用紧凑摘要和行内重命名，多账号用可管理列表，API Key 保存后只预览新账号、不自动切换。已有官方 Key 先显示为「默认账号」，明确添加/切换时才保全为具名池条目，保留原名称与已选团队 scope；保全失败不覆盖当前凭据。修复 CLI 短状态徽标的拆字换行，长说明独立展示；额度百分比和历史提示最多两位小数，不改写原始采样。Chromium 夹具增加中英双语、明暗主题与字体/祖先换行压力验证。
 
 > `0.7.6` 完善 CLI 导入与服务器目录选择：**移除父级弱化文字样式**，目录名、面包屑、输入与按钮使用主文字色；小字说明保持可读对比度，适配明暗主题。目录行增加文件夹图标、紧凑可滚动面包屑与 220px 列表上限；补齐加载、空目录、原路径失败重试、Esc 取消与焦点归还，空路径不再误触全量扫描。Chromium 夹具覆盖 360/390/1009/1040px、明暗主题、正常控件对比度 ≥4.5:1 与目录交互。
@@ -73,13 +75,13 @@
 
 ## 安装
 
-先在独立 `DSH_HOME` 验收，再安装到目标 Web profile。打包 `0.7.7` 使用新的目录，不覆盖之前版本的产物：
+先在独立 `DSH_HOME` 验收，再安装到目标 Web profile。打包 `0.7.8` 使用新的目录，不覆盖之前版本的产物：
 
 ```sh
 PACK_DIR="$(mktemp -d /tmp/dsh-provider-hub-pack.XXXXXX)"
 npm pack --pack-destination "${PACK_DIR:?}"
 # 在已安装 dsh 的主机上：
-npm_config_auto_install_peers=false dsh plugin --profile web add "${PACK_DIR:?}/dsh-provider-hub-0.7.7.tgz"
+npm_config_auto_install_peers=false dsh plugin --profile web add "${PACK_DIR:?}/dsh-provider-hub-0.7.8.tgz"
 ```
 
 从 `dsh-web-search` 0.3.x 升级：先 `dsh plugin --profile web remove dsh-web-search`，再按上面安装新包，并把 profile patch 中 `- id: dsh-web-search` 条目改名为 `dsh-provider-hub`（配置字段名不变，废弃的 `tool` 兼容字段可删除）。entry id 变更意味着旧配置不会自动迁移；额度三项缺省时使用默认值。

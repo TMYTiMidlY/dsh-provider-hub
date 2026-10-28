@@ -36,7 +36,8 @@ const sources=[{id:'codex',label:'默认目录 (~/.codex)',path:'/home/demo/.cod
 const accounts={list,rename,drop,setActive,sources:async request=>{state.scans++;state.sourceRequests.push({...request});await new Promise(r=>setTimeout(r,state.delay));return success({sources:request.directory?[{...sources[1],id:'directory',path:request.directory}]:sources,defaultSourceId:'codex',policy:'只读常用目录、浅层候选和字面 CODEX_HOME；不执行脚本、不全盘扫描。',scan:{elapsedMs:state.delay,checkedDirectories:42,timedOut:state.partial,truncated:state.partial,budgetMs:8000}})},import:async request=>{state.imports++;state.importRequests.push({...request});const entry={id:'33333333',name:request.name||'Imported account',email:'new@example.test',active:false,source:'cli',sourcePath:request.directory};state.entries.push(entry);return success({entry})}};
 // Model the backend response only: real official-credential preservation is tested independently.
 const pool={list,rename,drop,setActive,add:async request=>{state.addRequests.push({...request});if(config.keyConfigured!==false&&!state.entries.some(entry=>entry.active))state.entries.unshift({id:'official1',name:defaultName,active:true});const entry={id:'33333333',name:request.name||'New account',active:false,accountType:request.accountType||'personal'};state.entries.push(entry);return success({entry})}};
-const quota={snapshot:async request=>{state.quotaRequests.push({...request});return success({status:'ok',fetchedAt:Date.now()/1000,snapshot:{email:'work@example.test',plan:'PRO',windows:[{kind:'weekly',usedPercent:39.410000000000004,resetAt:Date.now()/1000+86400*5}],credits:{balance:54288.913}}})},history:async request=>{state.historyRequests.push({...request});return success({points:[{ts:Date.now()/1000-3600,used:{weekly:5}},{ts:Date.now()/1000-1800,used:{weekly:7}},{ts:Date.now()/1000-10,used:{weekly:39.410000000000004}}]})}};
+const denseHistory=[5,14.23,39.41,60.59,88.88,94,99.99,99.01,100,97.22,12.34,24.56,29.12,35.67,39.410000000000004];
+const quota={snapshot:async request=>{state.quotaRequests.push({...request});return success({status:'ok',fetchedAt:Date.now()/1000,snapshot:{email:'work@example.test',plan:'PRO',windows:structuredClone(config.windows??[{kind:'weekly',usedPercent:39.410000000000004,resetAt:Date.now()/1000+86400*5},{kind:'short',usedPercent:0,resetAt:Date.now()/1000+3*3600}]),credits:{balance:54288.913}}})},history:async request=>{state.historyRequests.push({...request});return success({sampleIntervalSeconds:3600,points:denseHistory.map((value,index)=>({ts:Math.floor(Date.now()/1000)-10-(denseHistory.length-1-index)*3600,used:{weekly:value,short:value/2},plan:index<12?'PRO':'PLUS'}))})}};
 const searchLogin={list:async()=>success({entries:[{key:'llm-pi-ai/openai-codex',authorized:config.authorized!==false,inFlight:false}]})};
 // Requests can be held/released explicitly: loading assertions never depend on a timer race.
 const home='/home/demo';
@@ -109,13 +110,102 @@ async function quotaPresentation(page) {
   return usage
 }
 
+async function chartBreathingRoom(page) {
+  const metrics = await page.locator('.ph-spark-chart').evaluate(chart => {
+    const rect = node => { const { x, y, width, height, right, bottom } = node.getBoundingClientRect(); return { x, y, width, height, right, bottom } }
+    const bounds = rect(chart)
+    return {
+      chart: bounds,
+      svg: rect(chart.querySelector('[data-quota-spark]')),
+      labels: [...chart.querySelectorAll('[data-quota-spark-value]')].map(node => ({ text: node.textContent, reason: node.dataset.quotaSparkValueReason, sampleX: Number(node.dataset.quotaSparkValueX), ...rect(node) })),
+      hits: [...chart.querySelectorAll('[data-quota-spark-hit]')].map(node => ({ ts: Number(node.dataset.quotaSparkTs), x: Number(node.getAttribute('x')) })),
+    }
+  })
+  assert.equal(metrics.hits.length, 15, 'dense fixture keeps every real sample rather than removing crowded points')
+  assert.equal(metrics.svg.height, 72, 'spacing changes preserve the 72px graph coordinate system')
+  assert.ok(metrics.labels.length >= 3, 'dense history retains useful real-observation labels')
+  assert.ok(metrics.labels.some(label => label.text === '100%'), 'the dense right-edge maximum remains visibly labeled')
+  for (const label of metrics.labels) {
+    assert.ok(label.x - metrics.chart.x >= 3.5, 'sample label has at least 4px left breathing room: ' + JSON.stringify({ chart: metrics.chart, label }))
+    assert.ok(metrics.chart.right - label.right >= 3.5, 'sample label has at least 4px right breathing room: ' + JSON.stringify({ chart: metrics.chart, label }))
+    assert.ok(label.y >= metrics.chart.y - .5 && label.bottom <= metrics.chart.bottom + .5, 'all label lanes stay within the chart: ' + JSON.stringify({ chart: metrics.chart, label }))
+    assert.doesNotMatch(label.text, /\d+\.\d{3,}%/, 'dense visible sample labels retain at most two decimals')
+  }
+  for (let first = 0; first < metrics.labels.length; first++) {
+    for (const second of metrics.labels.slice(first + 1)) {
+      const left = metrics.labels[first]
+      const horizontalGap = Math.max(second.x - left.right, left.x - second.right)
+      const verticalGap = Math.max(second.y - left.bottom, left.y - second.bottom)
+      assert.ok(horizontalGap >= 3.5 || verticalGap >= 1.5, 'dense sample labels keep separate horizontal boxes or 18px lanes: ' + JSON.stringify({ left, right: second, horizontalGap, verticalGap }))
+    }
+  }
+  return metrics
+}
+
+async function sectionBreathingRoom(page, kind) {
+  const quota = page.locator('[data-quota-section]')
+  if (await quota.count()) {
+    await page.locator('[data-quota-section][data-quota-state=ok]').waitFor()
+    await page.locator('[data-quota-sample-count="15"]').waitFor()
+  }
+  const metrics = await page.evaluate(kind => {
+    const bar = document.querySelector(kind === 'pool' ? '[data-pool-bar]' : '[data-codex-bar]')
+    const section = bar.closest('fieldset')
+    const rect = node => { const { x, y, width, height, right, bottom } = node.getBoundingClientRect(); return { x, y, width, height, right, bottom } }
+    const visible = node => { const style = getComputedStyle(node); const box = node.getBoundingClientRect(); return box.width > 1 && box.height > 1 && style.display !== 'none' && style.visibility !== 'hidden' && !['absolute', 'fixed'].includes(style.position) }
+    const children = [...section.children].filter(node => node.tagName !== 'LEGEND' && visible(node))
+    const quota = section.querySelector('[data-quota-section]')
+    const quotaChildren = quota ? [...quota.children].filter(visible) : []
+    const windows = quota ? [...quota.querySelectorAll('[data-quota-window]')] : []
+    const historyHead = quota?.querySelector('.ph-ranges')?.closest('.ph-quota-head')
+    const spark = quota?.querySelector('[data-quota-spark-wrap]')
+    return {
+      accountSection: section.classList.contains('ph-account-section'),
+      legendToBar: rect(bar).y - rect(section.querySelector(':scope > legend')).bottom,
+      siblings: children.slice(1).map((node, index) => ({ before: children[index].className, after: node.className, gap: rect(node).y - rect(children[index]).bottom })),
+      barToQuota: quota ? rect(quota).y - rect(bar).bottom : null,
+      quota: quota ? { box: rect(quota), padding: { top: rect(quotaChildren[0]).y - rect(quota).y, bottom: rect(quota).bottom - rect(quotaChildren.at(-1)).bottom, left: Math.min(...quotaChildren.map(node => rect(node).x - rect(quota).x)), right: Math.min(...quotaChildren.map(node => rect(quota).right - rect(node).right)) }, children: quotaChildren.map(node => ({ className: node.className, ...rect(node) })) } : null,
+      windows: windows.map(node => ({ kind: node.dataset.quotaWindow, ...rect(node), innerGaps: [...node.children].slice(1).map((child, index) => rect(child).y - rect(node.children[index]).bottom) })),
+      historyToChart: historyHead && spark ? rect(spark).y - rect(historyHead).bottom : null,
+    }
+  }, kind)
+  assert.equal(metrics.accountSection, true, 'account fieldsets opt into the shared spacing system')
+  assert.ok(metrics.legendToBar >= 7.5, 'account legend has at least 8px before the toolbar: ' + JSON.stringify(metrics))
+  for (const pair of metrics.siblings) assert.ok(pair.gap >= 11.5, 'every visible account-section sibling has at least 12px breathing room: ' + JSON.stringify(pair))
+  if (metrics.quota) {
+    assert.ok(metrics.barToQuota >= 11.5, 'account toolbar and quota never touch: ' + JSON.stringify(metrics))
+    for (const [side, padding] of Object.entries(metrics.quota.padding)) assert.ok(padding >= 13.5, 'quota has at least 14px actual ' + side + ' inset: ' + JSON.stringify(metrics.quota))
+    assert.equal(metrics.windows.length, 2, 'fixture reproduces both displayed quota windows')
+    assert.deepEqual(metrics.windows.map(window => window.kind), ['weekly', 'short'])
+    assert.ok(metrics.windows[1].y - metrics.windows[0].bottom >= 13.5, 'separate quota windows have at least 14px between them: ' + JSON.stringify(metrics.windows))
+    for (const window of metrics.windows) for (const gap of window.innerGaps) assert.ok(gap >= 5.5, 'quota value, progress bar and reset row have at least 6px between them: ' + JSON.stringify(window))
+    assert.ok(metrics.historyToChart >= 11.5, 'history heading/range controls have at least 12px before the graph: ' + JSON.stringify(metrics))
+  }
+  return { ...metrics, ...(metrics.quota ? { chart: await chartBreathingRoom(page) } : {}) }
+}
+
+async function exerciseHistoryRanges(page) {
+  const results = []
+  for (const hours of [24, 720, 168]) {
+    await page.locator(`[data-quota-range="${hours}"]`).click()
+    await page.waitForFunction(hours => {
+      const chart = document.querySelector('[data-quota-spark-wrap]')
+      return Number(chart?.dataset.quotaWindowEnd) - Number(chart?.dataset.quotaWindowStart) === hours * 3600 && document.querySelector('[data-quota-sample-count="15"]')
+    }, hours)
+    const chart = await chartBreathingRoom(page)
+    if (hours >= 168) assert.ok(chart.hits.every(hit => hit.x > 90), '15 recent samples truly cluster at the right edge of a wide time domain')
+    results.push({ hours, chart })
+  }
+  return results
+}
+
 async function accountGeometry(page, kind) {
   const metrics = await page.evaluate(kind => {
     const bar = document.querySelector(kind === 'pool' ? '[data-pool-bar]' : '[data-codex-bar]')
     const trigger = document.querySelector(kind === 'pool' ? '[data-pool-add-trigger]' : '[data-codex-add]')
     const summary = bar.querySelector('[data-account-single], [data-' + kind + '-select]')
     const rect = node => { const { x, y, width, height } = node.getBoundingClientRect(); return { x, y, width, height, right: x + width, bottom: y + height } }
-    return { overflow: document.documentElement.scrollWidth > innerWidth, width: innerWidth, bar: rect(bar), trigger: rect(trigger), summary: summary ? rect(summary) : null, toolbar: trigger.closest('.ph-pool-toolbar')?.parentElement === bar, names: [...bar.querySelectorAll('.ph-account-name')].map(node => ({ text: node.textContent, ...rect(node), ellipsis: getComputedStyle(node).textOverflow })) }
+    return { overflow: document.documentElement.scrollWidth > innerWidth, width: innerWidth, fontPressure: document.body.classList.contains('font-pressure'), bar: rect(bar), trigger: rect(trigger), summary: summary ? rect(summary) : null, toolbar: trigger.closest('.ph-pool-toolbar')?.parentElement === bar, names: [...bar.querySelectorAll('.ph-account-name')].map(node => ({ text: node.textContent, ...rect(node), ellipsis: getComputedStyle(node).textOverflow })) }
   }, kind)
   assert.equal(metrics.overflow, false, 'account controls do not widen the viewport: ' + JSON.stringify(metrics))
   assert.equal(metrics.toolbar, true, 'both add triggers share .ph-pool-toolbar beside selection or summary')
@@ -128,6 +218,10 @@ async function accountGeometry(page, kind) {
     const overlapX = Math.min(metrics.summary.right, metrics.trigger.right) - Math.max(metrics.summary.x, metrics.trigger.x)
     const overlapY = Math.min(metrics.summary.bottom, metrics.trigger.bottom) - Math.max(metrics.summary.y, metrics.trigger.y)
     assert.ok(overlapX <= 1 || overlapY <= 1, 'add trigger never overlaps the account summary/picker: ' + JSON.stringify(metrics))
+    const centerDelta = Math.abs(metrics.summary.y + metrics.summary.height / 2 - metrics.trigger.y - metrics.trigger.height / 2)
+    const heightDelta = Math.abs(metrics.summary.height - metrics.trigger.height)
+    assert.ok(centerDelta <= 1, 'account summary and add trigger are vertically centered together: ' + JSON.stringify({ centerDelta, metrics }))
+    assert.ok(heightDelta <= (metrics.fontPressure ? 4 : 1), 'account summary and add trigger have consistent control heights: ' + JSON.stringify({ heightDelta, metrics }))
   }
   for (const name of metrics.names) {
     assert.ok(name.text.trim(), 'accounts always expose a meaningful name')
@@ -174,10 +268,11 @@ async function themedGeometry(page, scenario, kind, label, { badge = false } = {
   for (const dark of [false, true]) {
     for (const pressure of [false, true]) {
       await page.evaluate(({ dark, pressure }) => { document.body.classList.toggle('dark', dark); document.body.classList.toggle('font-pressure', pressure) }, { dark, pressure })
+      const spacing = await sectionBreathingRoom(page, kind)
       const account = await accountGeometry(page, kind)
       const source = badge ? await sourceBadgeGeometry(page) : undefined
       await page.screenshot({ path: join(output, `${label}-${scenario.key}-${dark ? 'dark' : 'light'}${pressure ? '-font-pressure' : ''}.png`), fullPage: true })
-      results.push({ dark, pressure, account, ...(source ? { source } : {}) })
+      results.push({ dark, pressure, account, spacing, ...(source ? { source } : {}) })
     }
   }
   await page.evaluate(() => document.body.classList.remove('dark', 'font-pressure'))
@@ -459,6 +554,7 @@ async function exercisePool(browser, scenario, mode) {
   await page.waitForFunction(() => document.activeElement?.hasAttribute('data-pool-add-trigger'))
   await page.waitForFunction(() => window.fixture.quotaRequests.at(-1)?.keyId === '33333333')
   assert.equal(await page.evaluate(() => window.fixture.switches), 0, 'save only previews the new account; it never calls setActive')
+  const savedPreview = await themedGeometry(page, scenario, 'pool', `pool-${mode}-new-preview`)
   const entries = await page.evaluate(() => window.fixture.entries)
   assert.equal(entries.length, mode === 'empty' ? 1 : 2, 'fixture models preservation of the old official/real account')
   assert.equal(entries.find(entry => entry.id === '33333333').name, newName)
@@ -485,7 +581,7 @@ async function exercisePool(browser, scenario, mode) {
   const after = await themedGeometry(page, scenario, 'pool', `pool-${mode}-saved`)
   assert.deepEqual(errors, [])
   await page.close()
-  return { mode, before, panel, expanded, after, entries, browserErrors: errors.length }
+  return { mode, before, panel, expanded, savedPreview, after, entries, browserErrors: errors.length }
 }
 
 async function exerciseCodexSingle(browser, scenario) {
@@ -529,6 +625,7 @@ try {
     await page.locator('[data-codex-select]').waitFor()
     assert.equal(await page.evaluate(() => window.fixture.scans), 0, 'opening a quota preview never scans')
     const usage = await quotaPresentation(page)
+    const historyRanges = await exerciseHistoryRanges(page)
     await page.locator('[data-codex-select]').click()
     await page.locator('[data-codex-option="22222222"]').click()
     const accountsGeometry = await themedGeometry(page, scenario, 'codex', 'accounts-long-name')
@@ -553,6 +650,7 @@ try {
     assert.equal(await page.evaluate(() => window.fixture.scans), 0, 'web login never scans')
     await page.waitForFunction(() => document.activeElement === document.querySelector('[name=accountName]'))
     const addGeometry = await addPanelGeometry(page, 'codex')
+    const webSpacing = await sectionBreathingRoom(page, 'codex')
     await page.screenshot({ path: join(output, `add-web-${scenario.key}.png`), fullPage: true })
     await name.fill('A new account')
     await page.locator('[data-codex-add-method=cli]').click()
@@ -598,7 +696,7 @@ try {
     const pool = []
     for (const mode of ['default', 'single', 'empty']) pool.push(await exercisePool(browser, scenario, mode))
     const codexSingle = await exerciseCodexSingle(browser, scenario)
-    results.push({ ...scenario, usage, ...geometry, addGeometry, accountsGeometry, sourceStatuses, directoryPicker: picker, pool, codexSingle, browserErrors: errors.length })
+    results.push({ ...scenario, usage, historyRanges, ...geometry, addGeometry, webSpacing, accountsGeometry, sourceStatuses, directoryPicker: picker, pool, codexSingle, browserErrors: errors.length })
     await writeFile(join(output, 'layout-results.json'), JSON.stringify({ fixtureOnly: true, completedScenarios: results.length, results }, null, 2) + '\n')
   }
 } catch (error) {
@@ -612,4 +710,4 @@ try {
   throw error
 } finally { await browser.close() }
 await writeFile(join(output, 'layout-results.json'), JSON.stringify({ fixtureOnly: true, completedScenarios: results.length, results }, null, 2) + '\n')
-console.log(JSON.stringify({ fixtureOnly: true, results, screenshots: pathToFileURL(output).href }, null, 2))
+console.log(JSON.stringify({ fixtureOnly: true, completedScenarios: results.length, results: results.map(({ width, locale, browserErrors, pool, codexSingle }) => ({ width, locale, pages: 5, browserErrors: browserErrors + pool.reduce((sum, item) => sum + item.browserErrors, 0) + codexSingle.browserErrors, spacingChecks: true, quotaWindows: 2, denseSamples: 15 })), details: pathToFileURL(join(output, 'layout-results.json')).href, screenshots: pathToFileURL(output).href }, null, 2))

@@ -1402,7 +1402,7 @@ test('dense right-edge histories keep endpoint values readable without overlappi
         const left = x + parseFloat(label.props.style.marginLeft)
         const width = parseFloat(label.props.style.width)
         const top = parseFloat(label.props.style.top)
-        assert.ok(left >= -.001 && left + width <= chartWidth + .001, 'edge-aligned label stays inside the measured plot')
+        assert.ok(left >= 3.999 && left + width <= chartWidth - 3.999, 'edge-aligned labels keep a 4px breathing inset inside the measured plot')
         assert.ok(top >= 0 && top + 16 <= 72, 'vertical lanes stay within the readable plot height')
         return { left, right: left + width, top, bottom: top + 16 }
       })
