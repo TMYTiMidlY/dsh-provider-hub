@@ -174,7 +174,7 @@ test('Models account management never renders search marketing or credential-reu
     await settleDraw(draw)
     const text = flatten(draw()).filter(node => node.type !== 'style').map(node => typeof node.props?.children === 'string' ? node.props.children : '').join('\n')
     assert.doesNotMatch(text, /搜索|search/iu)
-    if (provider !== 'openai-codex') assert.match(text, locale === 'zh' ? /只预览额度与历史/u : /only previews its quota/u)
+    assert.ok(!flatten(draw()).some(node => node.props?.className === 'ph-preview-note'), 'the current account needs no redundant preview warning')
   }
 })
 
@@ -390,7 +390,8 @@ test('API-key provider card previews every pool key and switches the active one'
   assert.match(textOf(optionsAfter[1]), /当前生效/u, 'the switched key is labelled active')
   assert.ok(!textOf(optionsAfter[0]).includes('当前生效'))
 
-  // The add form stores a named key through the pool remote.
+  // The add form is explicit and stores a named key through the pool remote.
+  nodes = openPoolAdd(draw)
   const form = nodes.find(node => node.props?.['data-pool-add'])
   await form.props.onSubmit({
     preventDefault: () => {}, stopPropagation() {},
@@ -708,9 +709,9 @@ test('browser login reuses searchLogin.start and preserves notices while refresh
   nodes = flatten(draw())
   assert.deepEqual(calls.answer, [{ id: 'attempt-web', value: 'confirmed' }])
   assert.ok(calls.list > previousLists, 'OAuth completion refreshes the shared account pool')
-  assert.equal(openPicker(draw, 'codex').find(node => node.props?.['data-codex-option']).props['data-codex-option'], 'new-web')
+  assert.equal(accountControl(openPicker(draw, 'codex'), 'codex').props['data-account-single'], 'codex', 'one saved browser account has a concise summary, not a dropdown')
   assert.match(textOf(nodes.find(node => node.props?.['data-codex-account-meta'])), /网页授权/u)
-  assert.equal(nodes.find(node => node.props?.['data-codex-select']).props['data-selected-id'], 'new-web')
+  assert.equal(accountControl(nodes, 'codex').props['data-selected-id'], 'new-web')
   assert.equal(calls.snapshot.at(-1).grantId, 'new-web', 'OAuth completion targets the newly active grant')
   assert.ok(!nodes.some(node => node.props?.['data-quota-email']), 'Codex compact quota omits duplicate identity')
   assert.equal(calls.snapshot.length, 2, 'OAuth completion refreshes the main quota panel')
@@ -736,6 +737,7 @@ test('KeyPool awaits rejected mutations, preserves rename drafts and guards add 
   nodes = flatten(draw())
   assert.match(textOf(nodes.find(node => node.props?.role === 'alert')), /重命名失败.*synthetic rename rejection/u)
   assert.ok(nodes.some(node => node.props?.['data-pool-rename']), 'failed rename keeps the editing form')
+  nodes = openPoolAdd(draw)
   const event = formEvent({ name: { value: 'New key' }, value: { value: 'synthetic-test-only' } })
   event.currentTarget.reset = () => { resetCount++ }
   const add = nodes.find(node => node.props?.['data-pool-add']).props.onSubmit
@@ -747,6 +749,7 @@ test('KeyPool awaits rejected mutations, preserves rename drafts and guards add 
   nodes = flatten(draw())
   assert.match(textOf(nodes.find(node => node.props?.role === 'alert')), /添加失败.*synthetic add rejection/u)
   assert.equal(resetCount, 0, 'failed remote add does not erase the form')
+  assert.ok(nodes.some(node => node.props?.['data-pool-add-panel']), 'failed save keeps the explicit add panel open for correction')
 })
 
 test('account pickers share custom row editing and busy guards with provider-specific actions', async () => {
@@ -760,15 +763,14 @@ test('account pickers share custom row editing and busy guards with provider-spe
     openManagement(flatten(draw())); await settleDraw(draw)
     let nodes = flatten(draw())
     const toolbar = () => flatten(draw()).find(node => node.props?.[`data-${kind}-toolbar`])
-    const signature = () => flatten(toolbar()).filter(node => node.type === 'button').map(node => node.props['data-codex-add'] ? 'add' : node.props[`data-${kind}-action`])
+    const signature = () => flatten(toolbar()).filter(node => node.type === 'button').map(node => node.props['data-codex-add'] || node.props['data-pool-add-trigger'] ? 'add' : node.props[`data-${kind}-action`])
     const actions = () => flatten(draw()).filter(node => node.props?.[`data-${kind}-action`] === 'use')
-    assert.deepEqual(signature(), kind === 'codex' ? ['add'] : ['use'])
-    if (kind === 'pool') assert.equal(actions()[0].props.disabled, true)
-    else assert.equal(actions().length, 0, 'active Codex accounts never render a redundant use button')
+    assert.deepEqual(signature(), ['add'], 'both account bars reserve the toolbar for account addition')
+    assert.equal(actions().length, 0, 'active accounts never render a redundant use button')
     assert.equal(nodes.find(node => node.props?.[`data-${kind}-select`]).type, 'button')
     assert.equal(nodes.filter(node => node.type === 'select' && node.props.name !== 'source').length, 0, 'account selection is never a native select')
     nodes = openPicker(draw, kind)
-    assert.equal(nodes.find(node => node.props?.['data-account-drop'] === 'first').props.disabled, kind === 'codex', 'only Codex protects the current account from deletion')
+    assert.equal(nodes.find(node => node.props?.['data-account-drop'] === 'first').props.disabled, true, 'both providers protect the current account from deletion')
     const row = nodes.find(node => node.props?.['data-account-row'] === 'second')
     const icon = flatten(row).find(node => node.props?.['data-account-rename'])
     assert.match(icon.props['aria-label'], /Second account/u)
@@ -801,10 +803,10 @@ test('account pickers share custom row editing and busy guards with provider-spe
     assert.ok(!flatten(draw()).some(node => node.props?.[`data-${kind}-rename`]))
     assert.equal(renames.length, 1, 'cancel makes no RPC')
     chooseAccount(draw, kind, 'second')
-    assert.deepEqual(signature(), kind === 'codex' ? ['add'] : ['use'], 'the account selection bar keeps its provider-specific action')
+    assert.deepEqual(signature(), ['add'], 'previewing does not replace the dedicated Add toolbar slot')
     assert.equal(actions().length, 1, 'a non-active preview offers explicit activation')
     assert.equal(actions()[0].props.disabled, false)
-    if (kind === 'codex') assert.ok(!flatten(toolbar()).includes(actions()[0]), 'Codex activation is a preview action, not the Add toolbar slot')
+    assert.ok(!flatten(toolbar()).includes(actions()[0]), 'activation is a preview action, not the Add toolbar slot')
   }
 })
 
@@ -1173,8 +1175,8 @@ test('one selected preview waits for pool loading and ignores stale selection re
     assert.ok(calls.history.every(request => (kind === 'pool' ? request.keyId : request.grantId) === 'active'), 'unmounted stale snapshots cannot launch another account history probe')
     const bar = nodes.find(node => node.props?.[`data-${kind === 'pool' ? 'pool' : 'codex'}-bar`])
     assert.equal(bar.props.children.length, 2, 'picker and its provider-specific toolbar are direct siblings in one bar')
-    assert.deepEqual(flatten(bar).filter(node => node.props?.[`data-${kind}-action`]).map(node => node.props[`data-${kind}-action`]), kind === 'pool' ? ['use'] : [])
-    if (kind === 'codex') assert.ok(flatten(bar).some(node => node.props?.['data-codex-add']))
+    assert.deepEqual(flatten(bar).filter(node => node.props?.[`data-${kind}-action`]).map(node => node.props[`data-${kind}-action`]), [], 'the current account needs no redundant switch action in the bar')
+    assert.ok(flatten(bar).some(node => node.props?.[kind === 'codex' ? 'data-codex-add' : 'data-pool-add-trigger']))
   }
 })
 
@@ -1231,11 +1233,9 @@ test('row deletion is scoped, guarded, error-visible, and falls back after delet
     assert.equal(nodes.filter(node => node.props?.['data-quota-section']).length, 1)
     nodes = openPicker(draw, kind)
     const currentDrop = nodes.find(node => node.props?.['data-account-drop'] === 'active')
-    assert.equal(currentDrop.props.disabled, kind === 'codex')
-    if (kind === 'codex') {
-      await currentDrop.props.onClick({ stopPropagation() {} })
-      assert.equal(calls.drop.length, 2, 'stale callbacks cannot delete the current Codex grant')
-    }
+    assert.equal(currentDrop.props.disabled, true)
+    await currentDrop.props.onClick({ stopPropagation() {} })
+    assert.equal(calls.drop.length, 2, 'stale callbacks cannot delete the current account')
     assert.equal(calls.use.length, 0)
   }
 })
@@ -1296,7 +1296,7 @@ test('ZAI regional account forms isolate personal and per-account team scopes wi
     const pool = { ...emptyPool(), add: async request => { requests.push(request); return { ok: true, value: {} } }, list: async () => ({ ok: true, value: { entries: [{ id: 'team', name: 'Work', accountType: 'team', organization: 'org-safe', project: 'project-safe', active: true }] } }) }
     const { draw } = await mountPanel(uiQuota(), { provider, pool, keyConfigured: true })
     openManagement(flatten(draw())); await settleDraw(draw)
-    let nodes = flatten(draw())
+    let nodes = openPoolAdd(draw)
     assert.equal(nodes.filter(node => node.props?.['data-pool-type']).length, 2)
     assert.equal(nodes.find(node => node.props?.['data-pool-type'] === 'personal').props['aria-pressed'], true)
     assert.ok(!nodes.some(node => node.type === 'input' && ['organization', 'project'].includes(node.props.name)))
@@ -1310,7 +1310,8 @@ test('ZAI regional account forms isolate personal and per-account team scopes wi
     form = nodes.find(node => node.props?.['data-pool-add'])
     await form.props.onSubmit(formEvent({ name: { value: 'Team' }, value: { value: 'synthetic-secret' }, organization: { value: ' org-id ' }, project: { value: ' project-id ' } }))
     assert.deepEqual({ ...requests.at(-1) }, { provider, name: 'Team', value: 'synthetic-secret', accountType: 'team', organization: 'org-id', project: 'project-id' })
-    nodes = flatten(draw()); nodes.find(node => node.props?.['data-pool-type'] === 'personal').props.onClick(); nodes = flatten(draw())
+    nodes = openPoolAdd(draw)
+    assert.equal(nodes.find(node => node.props?.['data-pool-type'] === 'personal').props['aria-pressed'], true, 'a successfully saved team form reopens as personal, without stale scope fields')
     assert.ok(!nodes.some(node => node.type === 'input' && ['organization', 'project'].includes(node.props.name)))
     await nodes.find(node => node.props?.['data-pool-add']).props.onSubmit(formEvent({ name: { value: 'Personal' }, value: { value: 'synthetic-secret' }, organization: { value: 'stale-org' }, project: { value: 'stale-project' } }))
     assert.deepEqual({ ...requests.at(-1) }, { provider, name: 'Personal', value: 'synthetic-secret', accountType: 'personal' })
@@ -1322,7 +1323,7 @@ test('ZAI regional account forms isolate personal and per-account team scopes wi
   const pool = { ...emptyPool(), add: async request => { requests.push(request); return { ok: true, value: {} } } }
   const { draw } = await mountPanel(uiQuota(), { provider: 'kimi-coding', pool })
   openManagement(flatten(draw())); await settleDraw(draw)
-  const nodes = flatten(draw())
+  const nodes = openPoolAdd(draw)
   assert.ok(!nodes.some(node => node.props?.['data-pool-account-type']))
   await nodes.find(node => node.props?.['data-pool-add']).props.onSubmit(formEvent({ name: { value: 'Generic' }, value: { value: 'synthetic-secret' }, organization: { value: 'unused' }, project: { value: 'unused' } }))
   assert.deepEqual({ ...requests.at(-1) }, { provider: 'kimi-coding', name: 'Generic', value: 'synthetic-secret' })
@@ -1335,7 +1336,7 @@ test('account-name placeholders are generic in both locales and retain real exis
     const pool = { ...emptyPool(), list: async () => ({ ok: true, value: { entries: [{ id: 'real', name: 'Existing user-provided name', active: true }] } }) }
     const { draw } = await mountPanel(uiQuota(), { provider: 'zai', pool, locale })
     openManagement(flatten(draw())); await settleDraw(draw)
-    const nodes = flatten(draw())
+    const nodes = openPoolAdd(draw)
     assert.equal(nodes.find(node => node.type === 'input' && node.props.name === 'name').props.placeholder, locale === 'zh' ? '例如：工作账号' : 'e.g. Work account')
     assert.ok(textOf(nodes).includes('Existing user-provided name'))
     const codex = await mountPanel(uiQuota(), { locale })
@@ -1437,16 +1438,38 @@ test('single-point and empty histories keep fixed axes without fabricated endpoi
   assert.ok(nodes.find(node => node.props?.['data-quota-spark-empty']))
 })
 
+const accountControl = (nodes, kind) => nodes.find(node => node.props?.[`data-${kind}-select`] || node.props?.['data-account-single'] === kind)
 function openPicker(draw, kind) {
-  let nodes = flatten(draw())
-  const trigger = nodes.find(node => node.props?.[`data-${kind}-select`])
+  const nodes = flatten(draw())
+  const trigger = accountControl(nodes, kind)
+  assert.ok(trigger, `${kind} exposes a single-account summary or a multi-account picker`)
+  if (trigger.props['data-account-single'] === kind) return nodes
   if (!trigger.props['aria-expanded']) trigger.props.onClick()
   return flatten(draw())
 }
 function chooseAccount(draw, kind, id) {
   const nodes = openPicker(draw, kind)
-  nodes.find(node => node.props?.['data-account-choice'] === id).props.onClick()
+  const single = nodes.find(node => node.props?.['data-account-single'] === kind)
+  if (single) assert.equal(single.props['data-selected-id'], id, 'a lone account is already selected, without a fabricated choose action')
+  else {
+    const choice = nodes.find(node => node.props?.['data-account-choice'] === id)
+    assert.ok(choice, `a selectable ${kind} row exists for ${id}`)
+    choice.props.onClick()
+  }
   return flatten(draw())
+}
+function openPoolAdd(draw) {
+  let nodes = flatten(draw())
+  const trigger = nodes.find(node => node.props?.['data-pool-add-trigger'])
+  assert.ok(trigger, 'API-key accounts use an explicit Add account entry')
+  assert.equal(trigger.props.disabled, false, 'the loaded account section can open addition')
+  if (!trigger.props['aria-expanded']) {
+    assert.ok(!nodes.some(node => node.props?.['data-pool-add']), 'the form stays unmounted until explicitly expanded')
+    trigger.props.onClick()
+  }
+  nodes = flatten(draw())
+  assert.ok(nodes.find(node => node.props?.['data-pool-add']), 'the revealed panel contains its save form')
+  return nodes
 }
 function startRename(draw, kind, id, name) {
   let nodes = openPicker(draw, kind)
@@ -1482,7 +1505,8 @@ test('Codex addition stays beside selection and scans only when CLI import is op
   assert.equal(scans, 0)
   const bar = nodes.find(node => node.props?.['data-codex-bar'])
   assert.ok(flatten(bar).some(node => node.props?.['data-codex-add']))
-  assert.ok(flatten(bar).some(node => node.props?.['data-codex-select']))
+  assert.ok(flatten(bar).some(node => node.props?.['data-account-single'] === 'codex'))
+  assert.ok(!flatten(bar).some(node => node.props?.['data-codex-select']), 'a single account needs no one-option dropdown')
   nodes = await openAdd(draw, 'web')
   assert.equal(scans, 0, 'browser authorization does not inspect disk')
   assert.ok(nodes.indexOf(nodes.find(node => node.props?.['data-codex-add-panel'])) < nodes.indexOf(nodes.find(node => node.props?.['data-quota-section'])))
@@ -1537,4 +1561,291 @@ test('successful CLI import closes its form, clears the name and previews withou
   assert.equal(switches, 0)
   nodes.find(node => node.props?.['data-codex-add']).props.onClick(); nodes = flatten(draw())
   assert.equal(nodes.find(node => node.type === 'input' && node.props.name === 'accountName').props.value, '')
+})
+
+test('configured API keys have a localized read-only default summary before their first pool slot', async () => {
+  for (const locale of ['zh', 'en']) for (const provider of ['zai', 'kimi-coding']) {
+    const requests = { snapshot: [], history: [], mutations: [] }
+    const pool = { ...emptyPool(), add: async request => { requests.mutations.push(request); return { ok: true, value: {} } }, rename: async request => { requests.mutations.push(request); return { ok: true, value: {} } }, drop: async request => { requests.mutations.push(request); return { ok: true, value: {} } }, setActive: async request => { requests.mutations.push(request); return { ok: true, value: {} } } }
+    const quota = { snapshot: async request => { requests.snapshot.push(request); return { ok: true, value: { status: 'ok', snapshot: { windows: [] } } } }, history: async request => { requests.history.push(request); return { ok: true, value: { points: [] } } } }
+    const { draw } = await mountPanel(quota, { provider, locale, pool, keyConfigured: true })
+    openManagement(flatten(draw())); await settleDraw(draw)
+    const nodes = flatten(draw())
+    const summary = accountControl(nodes, 'pool')
+    assert.equal(summary.props['data-account-single'], 'pool')
+    assert.equal(summary.props['data-selected-id'], 'official')
+    assert.equal(flatten(summary).find(node => node.props?.className === 'ph-account-name').props.children, locale === 'zh' ? '默认账号' : 'Default account')
+    assert.equal(flatten(summary).find(node => node.props?.className === 'ph-account-state').props.children, locale === 'zh' ? '当前生效' : 'Active')
+    assert.ok(!nodes.some(node => node.props?.['data-pool-select'] || node.props?.['data-account-rename'] || node.props?.['data-account-drop'] || node.props?.['data-pool-action'] === 'use'), 'an unpersisted official identity has neither a dropdown nor unsafe pool mutations')
+    assert.ok(!nodes.some(node => node.props?.['data-pool-add-panel'] || node.props?.['data-pool-add']), 'addition stays collapsed by default')
+    assert.equal(nodes.find(node => node.props?.['data-pool-add-trigger']).props['aria-expanded'], false)
+    assert.equal(requests.snapshot.length, 1)
+    assert.equal(requests.history.length, 1)
+    assert.ok([...requests.snapshot, ...requests.history].every(request => request.provider === provider && request.keyId === undefined), 'virtual official is UI identity only, never a fabricated quota key ID')
+    assert.deepEqual(requests.mutations, [], 'viewing the official fallback never persists or switches it')
+  }
+})
+
+test('unconfigured empty API pools never fabricate a default account or quota request', async () => {
+  for (const locale of ['zh', 'en']) for (const provider of ['zai', 'kimi-coding']) {
+    const requests = []
+    const quota = { ...uiQuota(), snapshot: async request => { requests.push(request); return { ok: true, value: {} } } }
+    const { draw } = await mountPanel(quota, { provider, locale, keyConfigured: false })
+    openManagement(flatten(draw())); await settleDraw(draw)
+    const nodes = flatten(draw())
+    assert.equal(accountControl(nodes, 'pool'), undefined)
+    assert.ok(nodes.find(node => node.props?.['data-pool-empty']))
+    assert.ok(!nodes.some(node => node.props?.['data-quota-section'] || node.props?.['data-pool-action'] === 'use'))
+    assert.equal(nodes.find(node => node.props?.['data-pool-add-trigger']).props.disabled, false, 'a signed-out user can still explicitly add an account')
+    assert.deepEqual(requests, [])
+  }
+})
+
+test('an official fallback coexists with inactive saved accounts without changing credentials', async () => {
+  const calls = { snapshot: [], history: [], use: [], drop: [] }
+  const pool = { ...emptyPool(), list: async () => ({ ok: true, value: { entries: [{ id: 'saved', name: 'Saved account', configured: true, active: false }] } }), setActive: async request => { calls.use.push(request); return { ok: true, value: {} } }, drop: async request => { calls.drop.push(request); return { ok: true, value: {} } } }
+  const quota = { snapshot: async request => { calls.snapshot.push(request); return { ok: true, value: { status: 'ok', snapshot: { windows: [] } } } }, history: async request => { calls.history.push(request); return { ok: true, value: { points: [] } } } }
+  const { draw } = await mountPanel(quota, { provider: 'kimi-coding', pool, keyConfigured: true })
+  openManagement(flatten(draw())); await settleDraw(draw)
+  let nodes = openPicker(draw, 'pool')
+  assert.equal(accountControl(nodes, 'pool').props['data-selected-id'], 'official')
+  assert.deepEqual(nodes.filter(node => node.props?.['data-pool-option']).map(node => node.props['data-pool-option']), ['official', 'saved'])
+  assert.ok(!nodes.some(node => node.props?.['data-account-rename'] === 'official'))
+  const dropOfficial = nodes.find(node => node.props?.['data-account-drop'] === 'official')
+  assert.equal(dropOfficial.props.disabled, true)
+  await dropOfficial.props.onClick({ stopPropagation() {} })
+  chooseAccount(draw, 'pool', 'saved'); await settleDraw(draw)
+  nodes = flatten(draw())
+  assert.equal(calls.snapshot.at(-1).keyId, 'saved')
+  assert.equal(calls.history.at(-1).keyId, 'saved')
+  assert.match(textOf(nodes.find(node => node.props?.className === 'ph-preview-note')), /实际请求仍使用 默认账号/u)
+  assert.equal(nodes.find(node => node.props?.['data-pool-action'] === 'use').props.disabled, false)
+  chooseAccount(draw, 'pool', 'official'); await settleDraw(draw)
+  assert.equal(calls.snapshot.at(-1).keyId, undefined)
+  assert.equal(calls.history.at(-1).keyId, undefined)
+  assert.ok(!flatten(draw()).some(node => node.props?.['data-pool-action'] === 'use'))
+  assert.deepEqual(calls.use, [])
+  assert.deepEqual(calls.drop, [])
+})
+
+test('single-account rename stays guarded and its custom name survives expansion into multiple accounts', async () => {
+  for (const kind of ['pool', 'codex']) {
+    const entries = [{ id: 'original', name: '', active: true, configured: true }]
+    const calls = { rename: [], add: [], use: [] }
+    let finishRename
+    const saveAccount = async request => { calls.add.push(request); entries.push({ id: 'new', name: 'New account', active: false, configured: true }); return { ok: true, value: { entry: { id: 'new' } } } }
+    const service = {
+      ...(kind === 'pool' ? emptyPool() : emptyAccounts()),
+      list: async () => ({ ok: true, value: { entries: entries.map(entry => ({ ...entry })) } }),
+      rename: async request => { calls.rename.push(request); const result = await new Promise(resolve => { finishRename = resolve }); if (result.ok) entries[0].name = request.name; return result },
+      add: saveAccount,
+      import: saveAccount,
+      sources: async () => ({ ok: true, value: { sources: [{ id: 'source', path: '/host/codex', available: true, status: 'ready' }] } }),
+      setActive: async request => { calls.use.push(request); return { ok: true, value: {} } },
+    }
+    const { draw } = await mountPanel(uiQuota(), kind === 'pool' ? { provider: 'kimi-coding', pool: service, keyConfigured: true } : { accounts: service })
+    openManagement(flatten(draw())); await settleDraw(draw)
+    let nodes = flatten(draw())
+    assert.equal(accountControl(nodes, kind).props['data-account-single'], kind)
+    assert.match(textOf(accountControl(nodes, kind)), /默认账号/u, 'an unnamed real account uses a stable name, never its opaque ID')
+    assert.ok(!nodes.some(node => node.props?.[`data-${kind}-select`] || node.props?.['data-account-drop']), 'the lone current account has no redundant dropdown or delete action')
+    nodes = startRename(draw, kind, 'original', 'My original account')
+    const form = nodes.find(node => node.props?.[`data-${kind}-rename`])
+    const pending = form.props.onSubmit(formEvent({}))
+    await form.props.onSubmit(formEvent({}))
+    assert.equal(calls.rename.length, 1, 'single-summary rename also blocks same-render reentry')
+    nodes = flatten(draw())
+    assert.ok(nodes.filter(node => node.props?.['data-account-edit']).every(node => node.props.disabled))
+    nodes.find(node => node.props?.['data-account-edit'] === 'cancel').props.onClick({ stopPropagation() {} })
+    assert.ok(flatten(draw()).some(node => node.props?.[`data-${kind}-rename`]), 'a stale cancel callback cannot discard a pending rename')
+    finishRename({ ok: true, value: {} }); await pending; await settleDraw(draw)
+    nodes = flatten(draw())
+    assert.match(textOf(accountControl(nodes, kind)), /My original account/u)
+    assert.ok(!nodes.some(node => node.props?.[`data-${kind}-rename`]))
+    if (kind === 'pool') {
+      nodes = openPoolAdd(draw)
+      await nodes.find(node => node.props?.['data-pool-add']).props.onSubmit(formEvent({ name: { value: 'New account' }, value: { value: 'synthetic-new-key' } }))
+    } else {
+      nodes = await openAdd(draw, 'cli', 'New account')
+      assert.ok(nodes.some(node => node.props?.['data-codex-source-select']), 'a one-source CLI picker retains its directory-selection contract')
+      assert.ok(!nodes.some(node => node.props?.['data-account-single'] === 'codex-source'))
+      await nodes.find(node => node.props?.['data-codex-import']).props.onSubmit(formEvent({}))
+    }
+    await settleDraw(draw); nodes = openPicker(draw, kind)
+    assert.equal(accountControl(nodes, kind).props['data-selected-id'], 'new')
+    assert.ok(!nodes.some(node => node.props?.['data-account-single'] === kind))
+    const original = nodes.find(node => node.props?.[`data-${kind}-option`] === 'original')
+    assert.match(textOf(original), /My original account.*当前生效/u, 'switching to a multi-account picker preserves the renamed current identity')
+    assert.equal(nodes.find(node => node.props?.['data-account-drop'] === 'original').props.disabled, true)
+    assert.equal(calls.add.length, 1)
+    assert.deepEqual(calls.use, [], 'rename and addition remain preview-only, not implicit activation')
+  }
+})
+
+test('API-key saving is explicit, closes and clears on success, and selects only the returned preview', async () => {
+  const entries = []
+  const calls = { add: [], use: [], snapshot: [], history: [] }
+  let finishAdd, resets = 0
+  const pool = {
+    ...emptyPool(),
+    list: async () => ({ ok: true, value: { entries: entries.map(entry => ({ ...entry })) } }),
+    add: async request => { calls.add.push(request); await new Promise(resolve => { finishAdd = resolve }); entries.push({ id: 'old', name: '默认账号', active: true, configured: true }, { id: 'returned', name: request.name, active: false, configured: true }, { id: 'other', name: 'Unrelated account', active: false, configured: true }); return { ok: true, value: { entry: { id: 'returned' } } } },
+    setActive: async request => { calls.use.push(request); return { ok: true, value: {} } },
+  }
+  const quota = { snapshot: async request => { calls.snapshot.push(request); return { ok: true, value: { status: 'ok', snapshot: { windows: [] } } } }, history: async request => { calls.history.push(request); return { ok: true, value: { points: [] } } } }
+  const { draw } = await mountPanel(quota, { provider: 'zai', pool, keyConfigured: true })
+  openManagement(flatten(draw())); await settleDraw(draw)
+  let nodes = flatten(draw())
+  assert.ok(!nodes.some(node => node.props?.['data-pool-add']))
+  nodes = openPoolAdd(draw)
+  const panel = nodes.find(node => node.props?.['data-pool-add-panel'])
+  assert.match(panel.props.className, /ph-add-panel/u)
+  assert.ok(nodes.indexOf(panel) < nodes.indexOf(nodes.find(node => node.props?.['data-quota-section'])), 'the same compact add panel appears before quota')
+  assert.equal(nodes.find(node => node.props?.['data-pool-action'] === 'add').props.children, '保存账号')
+  const form = nodes.find(node => node.props?.['data-pool-add'])
+  for (const name of ['name', 'value']) {
+    assert.equal(flatten(form).find(node => node.type === 'input' && node.props.name === name).props.required, true)
+    assert.ok(!flatten(form).some(node => node.type === 'input' && node.props.name === name && node.props.value), `${name} starts empty`)
+  }
+  await form.props.onSubmit(formEvent({ name: { value: ' ' }, value: { value: 'synthetic-key' } }))
+  await form.props.onSubmit(formEvent({ name: { value: 'Named' }, value: { value: ' ' } }))
+  assert.deepEqual(calls.add, [], 'required name/key are guarded even without native HTML validation')
+  const event = formEvent({ name: { value: '  New account  ' }, value: { value: '  synthetic-new-key  ' } })
+  event.currentTarget.reset = () => { resets++; for (const element of Object.values(event.currentTarget.elements)) element.value = '' }
+  const save = form.props.onSubmit
+  const pending = save(event)
+  await save(event)
+  assert.equal(calls.add.length, 1)
+  nodes = flatten(draw())
+  assert.equal(nodes.find(node => node.props?.['data-pool-add-trigger']).props.disabled, true)
+  assert.equal(nodes.find(node => node.props?.['data-pool-add-close']).props.disabled, true)
+  assert.ok(flatten(nodes.find(node => node.props?.['data-pool-add'])).filter(node => node.type === 'input').every(node => node.props.disabled), 'pending save locks the whole form')
+  nodes.find(node => node.props?.['data-pool-add-close']).props.onClick()
+  assert.ok(flatten(draw()).some(node => node.props?.['data-pool-add-panel']), 'stale close cannot interrupt a pending save')
+  finishAdd(); await pending
+  nodes = flatten(draw())
+  assert.equal(nodes.find(node => node.props?.['data-pool-add-trigger']).focused, 1, 'success restores focus after the disabled save period')
+  await settleDraw(draw); nodes = flatten(draw())
+  assert.equal(resets, 1)
+  assert.deepEqual(calls.add.map(request => ({ ...request })), [{ provider: 'zai', name: 'New account', value: 'synthetic-new-key', accountType: 'personal' }])
+  assert.ok(!nodes.some(node => node.props?.['data-pool-add-panel'] || node.props?.['data-pool-add']))
+  assert.equal(accountControl(nodes, 'pool').props['data-selected-id'], 'returned', 'the result ID, not first/last slot, selects the sole preview')
+  assert.equal(calls.snapshot.at(-1).keyId, 'returned')
+  assert.equal(calls.history.at(-1).keyId, 'returned')
+  assert.deepEqual(calls.use, [])
+  assert.equal(entries.find(entry => entry.active).id, 'old')
+  assert.match(textOf(nodes.find(node => node.props?.className === 'ph-preview-note')), /实际请求仍使用 默认账号/u)
+  nodes = openPoolAdd(draw)
+  const reopened = nodes.find(node => node.props?.['data-pool-add'])
+  assert.ok(flatten(reopened).filter(node => node.type === 'input').every(node => !node.props.value && !node.props.defaultValue), 'freshly remounted uncontrolled inputs have no stale name or secret')
+  assert.equal(nodes.find(node => node.props?.['data-pool-type'] === 'personal').props['aria-pressed'], true)
+  assert.ok(!JSON.stringify(nodes).includes('synthetic-new-key'), 'neither the saved nor the reopened UI carries the secret')
+})
+
+test('quota usage and remaining values round at display time and clamp invalid inputs', async () => {
+  const scenarios = [
+    { value: 39.410000000000004, used: '39.41', left: '60.59', normalized: 39.410000000000004 },
+    { value: 12.3456, used: '12.35', left: '87.65', normalized: 12.3456 },
+    { value: 99.999, used: '100', left: '0', normalized: 99.999 },
+    { value: .00001, used: '0', left: '100', normalized: .00001 },
+    { value: -5, used: '0', left: '100', normalized: 0 },
+    { value: 140, used: '100', left: '0', normalized: 100 },
+    ...[NaN, Infinity, -Infinity, undefined, null, '39.41'].map(value => ({ value, used: '0', left: '100', normalized: 0 })),
+  ]
+  for (const locale of ['zh', 'en']) {
+    const snapshot = { windows: scenarios.map((scenario, index) => ({ kind: `scenario-${index}`, usedPercent: scenario.value })) }
+    const quota = { ...uiQuota(), snapshot: async () => ({ ok: true, value: { status: 'ok', snapshot } }) }
+    const { draw } = await mountPanel(quota, { locale })
+    openManagement(flatten(draw())); await settleDraw(draw)
+    const nodes = flatten(draw())
+    const windows = nodes.filter(node => node.props?.['data-quota-window'])
+    assert.equal(windows.length, scenarios.length)
+    for (const [index, scenario] of scenarios.entries()) {
+      const usage = flatten(windows[index]).find(node => node.props?.['data-quota-usage'])
+      assert.deepEqual(usage.props.children.map(node => node.props.children), locale === 'zh' ? [`已用 ${scenario.used}%`, '·', `剩余 ${scenario.left}%`] : [`Used ${scenario.used}%`, '·', `${scenario.left}% left`])
+      assert.equal(usage.props.children[1].props['aria-hidden'], true)
+      const bar = flatten(windows[index]).find(node => node.props?.role === 'progressbar')
+      assert.equal(bar.props['aria-valuenow'], scenario.normalized, 'rounding never rewrites finite source precision exposed to the meter')
+      assert.ok(Number.isFinite(bar.props['aria-valuenow']))
+      assert.equal(flatten(bar).find(node => node.props?.className === 'ph-bar-fill').props.style.width, `${scenario.normalized}%`)
+    }
+    assert.equal(snapshot.windows[0].usedPercent, 39.410000000000004, 'presentation does not mutate the raw snapshot')
+  }
+})
+
+test('history percentages clamp and round labels, native titles and accessible tooltips consistently', async () => {
+  const values = [39.410000000000004, -5, 140, NaN, Infinity, undefined, '12.34']
+  const points = values.map((value, index) => ({ ts: TEST_NOW - (values.length - index) * 3600, used: { weekly: value } }))
+  for (const locale of ['zh', 'en']) {
+    const quota = { ...uiQuota(), history: async () => ({ ok: true, value: { points } }) }
+    const { draw } = await mountPanel(quota, { locale })
+    openManagement(flatten(draw())); await settleDraw(draw)
+    let nodes = flatten(draw())
+    const hits = nodes.filter(node => node.props?.['data-quota-spark-hit'])
+    assert.equal(hits.length, 3, 'non-numeric and non-finite history samples are omitted rather than plotted as fabricated zeroes')
+    const labels = nodes.filter(node => node.props?.['data-quota-spark-value'])
+    assert.deepEqual(labels.map(node => node.props.children), ['39.41%', '100%', '0%'])
+    for (const [index, value] of ['39.41', '0', '100'].entries()) {
+      const expected = locale === 'zh' ? `已用 ${value}%` : `${value}% used`
+      assert.ok(hits[index].props['aria-label'].includes(expected))
+      assert.equal(flatten(hits[index]).find(node => node.type === 'title').props.children, hits[index].props['aria-label'])
+      hits[index].props.onFocus(); nodes = flatten(draw())
+      const tooltip = nodes.find(node => node.props?.['data-quota-spark-tip'])
+      assert.equal(tooltip.props.children, hits[index].props['aria-label'], 'keyboard tooltip and native title preserve the same rounded, bounded value')
+      hits[index].props.onBlur(); draw()
+    }
+    assert.equal(points[0].used.weekly, 39.410000000000004)
+    assert.equal(points[1].used.weekly, -5)
+    assert.equal(points[2].used.weekly, 140)
+  }
+})
+
+test('an initial API-key account-list failure offers retry before enabling account additions', async () => {
+  let failing = true, writes = 0
+  const pool = { ...emptyPool(), list: async () => failing ? { ok: false, error: { message: 'synthetic list unavailable' } } : { ok: true, value: { entries: [] } }, add: async () => { writes++; return { ok: true, value: {} } } }
+  const { draw } = await mountPanel(uiQuota(), { provider: 'zai', pool, keyConfigured: true })
+  openManagement(flatten(draw())); await settleDraw(draw)
+  let nodes = flatten(draw())
+  assert.match(textOf(nodes.find(node => node.props?.['data-pool-list-error'])), /synthetic list unavailable/)
+  assert.equal(nodes.find(node => node.props?.['data-pool-add-trigger']).props.disabled, true)
+  assert.ok(!nodes.some(node => node.props?.['data-quota-section']), 'failed loading never fabricates an account preview')
+  failing = false
+  await nodes.find(node => node.props?.['data-pool-list-retry']).props.onClick()
+  await settleDraw(draw); nodes = flatten(draw())
+  assert.ok(!nodes.some(node => node.props?.['data-pool-list-error']))
+  assert.equal(nodes.find(node => node.props?.['data-pool-add-trigger']).props.disabled, false)
+  assert.equal(nodes.find(node => node.props?.['data-account-single'] === 'pool').props['data-selected-id'], 'official')
+  assert.equal(writes, 0, 'retry only reads metadata')
+})
+
+test('status badges keep short localized status content and tone separate from long identities', async () => {
+  for (const locale of ['zh', 'en']) {
+    const email = `${'very-long-localized-account-'.repeat(6)}@example.test`
+    const entries = [{ id: 'current', name: 'Current', active: true, accountType: 'team' }, { id: 'other', name: 'Other', active: false }]
+    const accounts = { ...emptyAccounts(), list: async () => ({ ok: true, value: { entries } }), sources: async () => ({ ok: true, value: { sources: [
+      { id: 'ready', email, path: '/host/ready', available: true, status: 'ready' },
+      { id: 'expired', email, path: '/host/expired', available: true, status: 'expired' },
+      { id: 'missing', email, path: '/host/missing', available: false, status: 'missing' },
+    ] } }) }
+    const { draw } = await mountPanel(uiQuota(), { locale, accounts })
+    openManagement(flatten(draw())); await settleDraw(draw)
+    let nodes = openPicker(draw, 'codex')
+    assert.equal(nodes.find(node => node.props?.['data-account-team']).props.children, locale === 'zh' ? '团队账号' : 'Team account')
+    assert.equal(flatten(accountControl(nodes, 'codex')).find(node => node.props?.className === 'ph-account-state').props.children, locale === 'zh' ? '当前生效' : 'Active')
+    nodes = await openAdd(draw, 'cli')
+    for (const [id, tone, text] of [
+      ['ready', 'success', locale === 'zh' ? '可导入' : 'Ready to import'],
+      ['expired', 'warn', locale === 'zh' ? '已过期' : 'Expired'],
+      ['missing', 'neutral', locale === 'zh' ? '不可用' : 'Unavailable'],
+    ]) {
+      nodes = chooseAccount(draw, 'codex-source', id)
+      const status = nodes.find(node => node.props?.['data-codex-source-status'])
+      assert.equal(status.props['data-tone'], tone)
+      assert.equal(status.props.children, text)
+      assert.ok(!textOf(status).includes(email), 'a long account identity is not stuffed into a nonwrapping status badge')
+      const explanation = nodes.find(node => node.props?.className === 'ph-source-explanation')
+      if (id === 'ready') assert.equal(explanation, undefined)
+      else assert.equal(explanation.props.children, id === 'expired' ? locale === 'zh' ? '已过期，仍可导入；使用时可能需要刷新授权' : 'Expired; import is allowed but authorization may need refreshing' : locale === 'zh' ? '该目录暂无可用登录态' : 'no usable login state in this directory', 'long guidance stays outside the compact status badge')
+    }
+  }
 })
